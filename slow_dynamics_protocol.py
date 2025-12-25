@@ -141,10 +141,34 @@ for n_fl in range(num_files_use):
 
 #%% loading echo data
 
+# loading datasets
+data_dir = 'F:/AC_data/caiman_data_echo/'
+flist = f_load_from_dir(data_dir, ext_list = ['mat'], tags=['cont', 'results_cnmf_sort'])
+
+# setting parameters
+frame_rate = 1000/107.2125   # in Hz
+# [pre, post] time around stimulus onset to analyze
+        # in sec
 
 
+num_files_use = 20 #len(flist)
 
+firing_rates_all = []
+trial_types_all = []
+stim_times_all = []
+for n_fl in range(num_files_use):
+    # loading raw calcium data, trial types, and stimuli times
+    fname = flist[n_fl]
+    data_raw, trial_types, stim_times, vid_cuts = f_load_firing_rates(fpath=data_dir + fname)
     
+    # deconvolving calcium traces into firing rate proxy
+    firing_rates = f_smooth_dfdt(data_raw, sigma_frames=frame_rate*0.1)     # 100ms smoothing std
+    
+    firing_rates_all.append(firing_rates)
+    trial_types_all.append(trial_types)
+    stim_times_all.append(stim_times)
+
+
 
 #%%
 # plt.close('all')
