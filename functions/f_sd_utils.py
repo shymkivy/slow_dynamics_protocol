@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 
 #%%
-def f_load_from_dir(dir_path, ext_list = [], tags = None):
+def f_get_fnames_from_dir(dir_path, ext_list = [], tags = None):
 
     f_list = os.listdir(dir_path)
     f_list2 = []
@@ -45,37 +45,85 @@ def f_load_from_dir(dir_path, ext_list = [], tags = None):
 
 #%%
 
-def f_load_firing_rates(fpath):
+def f_load_firing_rates(fpath, data_tag = 'results_cnmf_sort.mat', proc_tag = 'processed_data.mat'):
     
     fpath2 = fpath.removesuffix('_results_cnmf_sort.mat')
     
-    f = h5py.File(fpath2 + '_results_cnmf_sort.mat', 'r')
-    f_proc = h5py.File(fpath2 + '_processed_data.mat', 'r')
-
-    d_est = f['est']
-    d_proc = f['proc']
+    dir_path, fname = os.path.split(fpath2)
     
-    C = d_est['C'][()]
-    YrA = d_est['YrA'][()]
-
-    comp_acc = d_proc['comp_accepted'][()].flatten().astype(bool)
-
-    ca_traces_cut = (C + YrA)[:,comp_acc].T
-
-    vid_cuts_trace = f_proc[f_proc['data']['file_cuts_params'][0][0]]['vid_cuts_trace'][()].flatten().astype(bool)
+    fname_core = fname
+    if data_tag in fname_core:
+        fname_core = fname_core.removesuffix(data_tag)
+    if proc_tag in fname_core:
+        fname_core = fname_core.removesuffix(proc_tag)
     
-    trial_types = f_proc['data']['trial_types'][()].flatten().astype(int)
+    flist_data = f_get_fnames_from_dir(dir_path, ext_list = ['.mat'], tags = [fname_core, data_tag])
+    fname_proc = f_get_fnames_from_dir(dir_path, ext_list = ['.mat'], tags = [fname_core, proc_tag])
     
-    stim_times = f_proc[f_proc['data']['stim_times_frame'][0][0]][()].flatten().astype(int)
+    do_load = False
+    if len(fname_proc):
+        if len(flist_data):
+            do_load = True
+        else:
+            print(fname_core + " data file with " + data_tag +  " tag not found, skipping")
+    else:
+        print(fname_core + " proc file with " + proc_tag +  " tag not found, skipping")
     
-    f.close()
-    f_proc.close()
+    data_out = {'files_loaded':     do_load,
+                'flist_data':       flist_data,
+                'flist_proc':       fname_proc}
+    if do_load:
+        
+        f_proc = h5py.File(dir_path + '/' + fname_proc[0], 'r')
+        vid_cuts_trace = f_proc[f_proc['data']['file_cuts_params'][0][0]]['vid_cuts_trace'][()].flatten().astype(bool)
+        trial_types = f_proc['data']['trial_types'][()].flatten().astype(int)
+        stim_times = f_proc[f_proc['data']['stim_times_frame'][0][0]][()].flatten().astype(int)
+        
+        if 'volume_period' in f_proc['data']['frame_data'].keys():
+            data_out['volume_period'] = f_proc['data']['frame_data']['volume_period'][()].flatten()
+        if 'isi' in f_proc['data']['stim_params'].keys():
+            data_out['isi'] = f_proc['data']['stim_params']['isi'][()].flatten()
+        if 'MMN_orientations' in f_proc['data'].keys():
+            data_out['MMN_ori'] = f_proc['data']['MMN_orientations'][()].flatten().astype(int)
+        if 'MMN_freq' in f_proc['data']['stim_params'].keys():
+            data_out['MMN_ori'] = f_proc['data']['stim_params']['MMN_freq'][()].flatten().astype(int)
 
-    ca_traces = np.zeros((ca_traces_cut.shape[0], vid_cuts_trace.shape[0]))
-
-    ca_traces[:, vid_cuts_trace] = ca_traces_cut
+        f_proc.close()
+        
+        ca_traces_all = []
+        dset_idx_all = []
+        
+        for n_fl in range(len(flist_data)):
+            fname_data = flist_data[n_fl]
+            f = h5py.File(dir_path + '/' + fname_data, 'r')
+        
+            d_est = f['est']
+            d_proc = f['proc']
+        
+            C = d_est['C'][()]
+            YrA = d_est['YrA'][()]
+            
+            comp_acc = d_proc['comp_accepted'][()].flatten().astype(bool)
     
-    return ca_traces, trial_types, stim_times, vid_cuts_trace
+            ca_traces_cut = (C + YrA)[:,comp_acc].T
+            ca_traces = np.zeros((ca_traces_cut.shape[0], vid_cuts_trace.shape[0]))
+            ca_traces[:, vid_cuts_trace] = ca_traces_cut
+            
+            ca_traces_all.append(ca_traces)
+            dset_idx_all.append(np.ones(ca_traces.shape[0], dtype=int)*(n_fl))
+            f.close()
+        
+        ca_traces = np.vstack(ca_traces_all)
+        dset_idx = np.hstack(dset_idx_all)
+        
+        data_out['ca_traces'] = ca_traces
+        data_out['trial_types'] = trial_types
+        data_out['stim_times'] = stim_times
+        data_out['vid_cuts_trace'] = vid_cuts_trace
+        data_out['files_loaded'] = do_load
+        data_out['dset_idx'] = dset_idx
+        
+    return data_out
     
 
 def f_smooth_dfdt(data, do_smooth=True, sigma_frames=1, normalize=True, rectify=True):
