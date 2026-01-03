@@ -60,7 +60,7 @@ trials_analyze = np.arange(1,11)
 resp_cells_all = []
 for n_fl in range(len(stim_trig_resp_tuning_all)):
     print('computing stats dset %d/%d' % (n_fl+1, len(stim_trig_resp_tuning_all)))
-    resp_cells = f_compute_tuning(stim_trig_resp_tuning_all[n_fl], trial_types_all[n_fl], trials_analyze, plot_t_tuning, num_samp=2000, z_thresh = 2, sig_resp_win = [0, 1.5])
+    resp_cells = f_compute_tuning(stim_trig_resp_tuning_all[n_fl], trial_types_all[n_fl], trials_analyze, plot_t_tuning, num_samp=2000, z_thresh = 3, sig_resp_win = [0, 1.2])
     resp_cells_all.append(resp_cells)
     
     
@@ -121,12 +121,14 @@ col1 = plt.colormaps['jet'](np.linspace(0, 1, 10))
 plt.figure()
 corr_tn_all = np.zeros((len(trials_analyze), len(idx_uq)))
 for n_tn in range(len(trials_analyze)):
-    corr_tn = np.zeros(len(idx_uq))
+    corr_tn = np.full(len(idx_uq), np.nan)
     for n_isi in range(len(idx_uq)):
         idx1 = (idx_uq[n_isi] == np.array(isi_all)).flatten()
-        corr_tn[n_isi] = np.nanmean(corr_vals[idx1,n_tn])
-        corr_tn_all[n_tn, n_isi] = np.nanmean(corr_vals[idx1,n_tn])
-    plt.plot(idx_uq, corr_tn, '-o', color=col1[n_tn])
+        if np.sum(~np.isnan(corr_vals[idx1,n_tn])):
+            corr_tn[n_isi] = np.nanmean(corr_vals[idx1,n_tn])
+            corr_tn_all[n_tn, n_isi] = np.nanmean(corr_vals[idx1,n_tn])
+    if np.sum(~np.isnan(corr_tn)):
+        plt.plot(idx_uq, corr_tn, '-o', color=col1[n_tn])
     
 plt.plot(idx_uq, np.nanmean(corr_tn_all, axis=0), '-o', color='k')
 
