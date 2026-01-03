@@ -10,6 +10,7 @@ import numpy as np
 import time
 
 from sklearn import svm
+from sklearn.metrics import accuracy_score
 from scipy import linalg
 
 import matplotlib.pyplot as plt
@@ -82,11 +83,11 @@ def f_sample_trial_data_dec(rates_in, stim_loc, trial_types):
 
 #%%
 
-def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, num_cv=5, fixed_time=0):
-    num_dec = len(X_all)
+def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, num_cv=5, fixed_time=0, add_noise_sigma=0.1, normalize = True, get_train_coeffs=False, log=False):
+    num_dset = len(X_all)
     
-    num_t_bins, num_trials, num_cells = X_all[0].shape
-
+    num_cells, num_t_bins, num_trials = X_all[0].shape
+    
     if train_test_method == 'full':
         train_t_idx = np.arange(num_t_bins)
         test_t_idx = np.repeat(np.arange(num_t_bins).reshape((1,num_t_bins)), num_t_bins, axis=0)
@@ -100,57 +101,144 @@ def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, nu
         train_t_idx = np.arange(num_t_bins)
         test_t_idx = (np.ones(num_t_bins) * fixed_time).astype(int)
 
-    perform_train_test1 = np.zeros((train_t_idx.shape[0], test_t_idx[0].shape[0], num_cv, num_dec))
-
+    perform_train_test1 = np.zeros((train_t_idx.shape[0], test_t_idx[0].shape[0], num_cv, num_dset))
+    
+    if get_train_coeffs:
+        n_classes = len(np.unique(Y_all))
+        num_ovo_dec = int(n_classes * (n_classes-1) / 2)
+        train_coeffs = np.zeros((num_cells, train_t_idx.shape[0], num_cv, num_ovo_dec, num_dset))
+        train_intercepts = np.zeros((train_t_idx.shape[0], num_cv, num_ovo_dec, num_dset))
+    
     start_t = time.time()
 
-    for n_dec in range(num_dec):
-        X_use = X_all[n_dec]
+    for n_dset in range(num_dset):
+        X_use = X_all[n_dset]
+        
+        if add_noise_sigma:
+            X_use = X_use + np.random.normal(0, add_noise_sigma, size=X_use.shape)
+        
+        if normalize:
+            for n_cell in range(num_cells):
+                X_use1 = X_use[n_cell,:,:]
+                X_use2 = X_use1 - np.mean(X_use1)
+                X_use[n_cell,:,:] = X_use2/np.std(X_use2)
 
         if pca_var_frac < 1 and pca_var_frac !=0:
             
-            X_use2d = np.reshape(X_use, (num_t_bins*num_trials, num_cells), order = 'F')
+            X_use2d = np.reshape(X_use, (num_cells, num_t_bins*num_trials), order = 'F')
             
-            U, S, Vh = linalg.svd(X_use2d, full_matrices=False)
+            U, S, Vh = linalg.svd(X_use2d.T, full_matrices=False)
             cum_var = np.cumsum(S**2/np.sum(S**2))
             comp_include_idx = np.where(cum_var > pca_var_frac)[0][0]+1
             #X_rec = np.dot(U, Vh*S[:, None])
-            X_LD2d = np.dot(X_use2d, Vh.T)
-            X_use2 = np.reshape(X_LD2d[:,:comp_include_idx], (num_t_bins, num_trials, comp_include_idx), order = 'F')
+            X_LD2d = np.dot(X_use2d.T, Vh.T).T
+            X_use2 = np.reshape(X_LD2d[:comp_include_idx,:], (comp_include_idx, num_t_bins, num_trials), order = 'F')
         else:
             X_use2 = X_use
             
-        y_data2 = Y_all[n_dec]
+        y_data2 = Y_all[n_dset]
         
-        for n_tr in range(train_t_idx.shape[0]): # 
-            print('dec %d of %d; train iter %d/%d' % (n_dec+1, num_dec, n_tr, train_t_idx.shape[0]))    
+        for n_bin in range(train_t_idx.shape[0]): # 
+
+            if log:
+                print('dset %d of %d; train bin %d/%d' % (n_dset+1, num_dset, n_bin, train_t_idx.shape[0]))    
         
-            n_tr2 = train_t_idx[n_tr]
+            n_bin2 = train_t_idx[n_bin]
             
-            X_train = X_use2[n_tr2,:,:]
+            X_train = X_use2[:,n_bin2,:]
             
             cv_groups = f_make_cv_groups(num_trials, num_cv)
             
             for n_cv in range(num_cv):
                 test_idx = cv_groups[n_cv]
                 train_idx = ~test_idx
-
-                svc = svm.SVC(kernel='linear', C=1,gamma='auto')
-                svc.fit(X_train[train_idx,:], y_data2[train_idx])
                 
-                for n_test in range(test_t_idx[n_tr].shape[0]):
-                    n_test2 = test_t_idx[n_tr][n_test]
-                    X_test = X_use2[n_test2,:,:]
+                X_train2 = X_train[:,train_idx]
+                
+                svc = svm.SVC(kernel='linear', C=1,gamma='auto') # ,verbose=True , probability=True
+                svc.fit(X_train2.T, y_data2[train_idx])
+                
+                if get_train_coeffs:
+                    train_coeffs[:,n_bin,n_cv,:,n_dset] = svc.coef_.T 
+                    train_intercepts[n_bin,n_cv,:,n_dset] = svc.intercept_
+                
+                for n_test in range(test_t_idx[n_bin].shape[0]):
+                    n_test2 = test_t_idx[n_bin][n_test]
+                    X_test = X_use2[:,n_test2,:]
                     
-                    test_pred1 = svc.predict(X_test[test_idx])
-                    perform_train_test1[n_tr, n_test, n_cv, n_dec] = np.sum(y_data2[test_idx] == test_pred1)/test_pred1.shape[0]
-    
+                    test_pred1 = svc.predict(X_test[:,test_idx].T)
+                    perform_train_test1[n_bin, n_test, n_cv, n_dset] = accuracy_score(y_data2[test_idx], test_pred1)
+                    # perform_train_test1[n_bin, n_test, n_cv, n_dset] = np.sum(y_data2[test_idx] == test_pred1)/test_pred1.shape[0]
+                    # perform_train_test1[n_bin, n_test, n_cv, n_dset] = svc.score(X_test[:,test_idx].T, y_data2[test_idx])
+                    if 0:
+                        plt.figure()
+                        plt.imshow(svc.coef_)
+                        
+                        plt.figure()
+                        plt.plot(svc.coef_.T)
+                        
+                        plt.figure()
+                        plt.plot(svc.coef_[:,15])
+                        
+                        # decision using svc
+                        # X = X_test[:,test_idx].T
+                        # X = svc._validate_for_predict(X)
+                        # X = svc._compute_kernel(X)
+                        # adec = svc._dense_decision_function(X)
+                        
+                        # decisison using dot prod
+                        # adec = np.dot(X_test[:,test_idx].T, svc.coef_.T) + svc.intercept_
+                        
+                        # 45 is the number of decoders created to do multiclass classification of 10 classes
+                        # first is class 1 vs class 2
+                        # n_samples, _ =adec.shape
+                        # predictions = adec < 0
+                        # confidences = -adec
+                        # n_classes = 10
+                        # votes = np.zeros((n_samples, n_classes))
+                        # sum_of_confidences = np.zeros((n_samples, n_classes))
+                        # k = 0
+                        # for i in range(n_classes):
+                        #    for j in range(i + 1, n_classes):
+                        #        sum_of_confidences[:, i] -= confidences[:, k]
+                        #        sum_of_confidences[:, j] += confidences[:, k]
+                        #        votes[predictions[:, k] == 0, i] += 1
+                        #        votes[predictions[:, k] == 1, j] += 1
+                        #        k+=1
+                        # transformed_confidences = sum_of_confidences / (3 * (np.abs(sum_of_confidences) + 1))
+                        # return votes + transformed_confidences
+                        
+                        # this value used to compute decision, same as votes + transfomed confidences
+                        # a = svc.decision_function(X_test[:,test_idx].T)
+                        
+                        # this shows confidence in each trial decoding (probability=True has to be used, computationally expensive)
+                        # b = svc.predict_proba(X_test[:,test_idx].T)
+                                      
+                        # plt.figure()
+                        # plt.plot(svc.coef_[:9,:].T)
+                        
     perform_train_test2 = np.mean(perform_train_test1, axis=2)
     
     run_duration = time.time() - start_t
-    print('done; %.2f sec' % run_duration)
+    if log:
+        print('done; %.2f sec' % run_duration)
     
-    return perform_train_test2
+    dec_out = {'train_test_method':     train_test_method,
+               'pca_var_frac':          pca_var_frac,
+               'num_cv':                num_cv,
+               'fixed_time':            fixed_time,
+               'add_noise_sigma':       add_noise_sigma,
+               'normalize':             normalize,
+               'performance':           perform_train_test2,
+               }
+    
+    if get_train_coeffs:
+        dec_out['train_coeffs'] = train_coeffs
+        dec_out['train_intercepts'] = train_intercepts
+        dec_out['num_classes'] = n_classes
+        dec_out['num_ovo_dec'] = num_ovo_dec
+    
+    return dec_out
 
 def f_shuffle_trials(trials):
     trials_idx = np.arange(trials.shape[0])
@@ -161,10 +249,10 @@ def f_shuffle_trials(trials):
 
 #%%
 
-def f_plot_binwise_dec(perform_list, train_test_method='diag', plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, fixed_time=0.25, title_tag=''):
+def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, fixed_time=0.25, title_tag=''):
     
-    if type(perform_list) is not list:
-        perform_list = [perform_list]
+    if type(dec_data_list) is not list:
+        dec_data_list = [dec_data_list]
     
     plt_start2 = np.argmin(np.abs(plot_start - plot_t))
     plt_end2 = np.argmin(np.abs(plot_end - plot_t))
@@ -182,12 +270,14 @@ def f_plot_binwise_dec(perform_list, train_test_method='diag', plot_t=None, plot
     
     figures = {}
     
-    num_dsets = len(perform_list)
+    num_dsets = len(dec_data_list)
+    
+    train_test_method = dec_data_list[0]['train_test_method']
     
     if train_test_method == 'full':
         
         for n_d in range(num_dsets):
-            perform_train_test = perform_list[n_d]
+            perform_train_test = dec_data_list[n_d]['performance']
             num_t, _, num_dec = perform_train_test.shape
         
             figures['full'] = []
@@ -238,11 +328,11 @@ def f_plot_binwise_dec(perform_list, train_test_method='diag', plot_t=None, plot
         
         fig1, ax1 = plt.subplots()
         
-        num_t, _, num_dec = perform_list[0].shape
+        num_t, _, num_dec = dec_data_list[0]['performance'].shape
         traces_all = np.zeros((num_dsets, num_dec, len(plot_t2)))
         
         for n_d in range(num_dsets):
-            perform_train_test = perform_list[n_d]
+            perform_train_test = dec_data_list[n_d]['performance']
             num_t, _, num_dec = perform_train_test.shape
 
             for n_dec in range(num_dec):
