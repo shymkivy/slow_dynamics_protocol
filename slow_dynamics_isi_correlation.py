@@ -5,67 +5,51 @@ Created on Fri Jan  2 18:11:13 2026
 @author: ys2605
 """
 
-# importing functions
-pipeline_dir = 'C:/Users/ys2605/Desktop/stuff/slow_dynamics_analysis'
-
+# ---- importing functions ----
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.spatial.distance import pdist, squareform
 
+# importing slow dynamics pipeline
+pipeline_dir = 'C:/Users/ys2605/Desktop/stuff/slow_dynamics_analysis'    # edit this  
 sys.path.append(pipeline_dir + '/functions')
-from f_sd_utils import f_get_fnames_from_dir, f_load_firing_rates, f_get_frames, f_get_stim_trig_resp, f_compute_tuning
-from f_sd_utils import f_save_fig
+from f_sd_utils import f_get_fnames_from_dir, f_load_caim_data, f_get_values, f_get_frames, f_get_stim_trig_resp, f_compute_tuning, f_save_fig
 
-#%% loading echo data
+#%% ---- loading echo data ----
 data_dir = 'F:/AC_data/caiman_data_echo/'
 # search for files to load using tags in the filename
 flist = f_get_fnames_from_dir(data_dir, ext_list = ['mat'], tags=['cont', '_processed_data'])
 
-firing_rates_all = []
-trial_types_all = []
-stim_times_all = []
-isi_all = []
-volume_period_all = []
+# loading raw firing rates, trial types, and stimuli times
+# here you can indicate to use oasis deconvolution or smoothdfdt
+data_out = f_load_caim_data(data_dir, flist, deconvolution='oasis', smooth_std_duration=0)
 
-for n_fl in range(len(flist)):   # len(flist) or some number
-    # loading raw calcium data, trial types, and stimuli times
-    # here you can indicate to use oasis deconvolution or smoothdfdt
-    data_out = f_load_firing_rates(fpath=data_dir+flist[n_fl], deconvolution='oasis', smooth_std_duration=0.1)      # oasis, smoothdfdt; normally smooth with 0.1sec      # oasis, smoothdfdt; normally smooth with 0.1sec
-    
-    # extract firing rates data and parameters we will use from each dataset
-    if data_out['files_loaded']:
-        firing_rates_all.append(data_out['firing_rates'])
-        trial_types_all.append(data_out['trial_types'])
-        stim_times_all.append(data_out['stim_times'])
-        isi_all.append(data_out['isi'])
-        volume_period_all.append(data_out['volume_period'])
-
-#%% calculate cell tuning and extract responsive cells
+#%% ---- calculate cell tuning and extract responsive cells ----
 # indicate a list of trial types to analyze. In this case the trial types are indexed from 1-10
 trials_analyze = np.arange(1,11)
 
-trial_frames, plot_t_tuning = f_get_frames(trial_win = [-1, 2], frame_rate = 1000/np.mean(volume_period_all))
+trial_frames, plot_t_tuning = f_get_frames(trial_win = [-1, 2], frame_rate = 1000/np.mean(f_get_values(data_out, 'volume_period')))
 
 resp_cells_all = []
-for n_fl in range(len(firing_rates_all)):  
+for n_fl in range(len(data_out)):  
     # computing stimulus triggered average (neurons, frames, trials)
-    stim_trig_resp = f_get_stim_trig_resp(firing_rates_all[n_fl], stim_times_all[n_fl], trial_frames = trial_frames)
+    stim_trig_resp = f_get_stim_trig_resp(data_out[n_fl]['firing_rates'], data_out[n_fl]['stim_times'], trial_frames=trial_frames)
 
-    print('computing stats dset %d/%d' % (n_fl+1, len(firing_rates_all)))
-    resp_cells = f_compute_tuning(stim_trig_resp, trial_types_all[n_fl], trials_analyze, plot_t_tuning, num_samp=2000, z_thresh = 3, sig_resp_win = [0, 1.2])
+    print('computing stats dset %d/%d' % (n_fl+1, len(data_out)))
+    resp_cells = f_compute_tuning(stim_trig_resp, data_out[n_fl]['trial_types'], trials_analyze, plot_t_tuning, num_samp=2000, z_thresh = 3, sig_resp_win = [0, 1.2])
     resp_cells_all.append(resp_cells)
 
-#%% corrrlation analysis echo
+#%% ---- corrrlation analysis echo ----
 trials_analyze = np.arange(1,11)
 
-trial_frames, plot_t = f_get_frames(trial_win = [-0.05, .95], frame_rate = 1000/np.mean(volume_period_all))
-corr_vals = np.full((len(firing_rates_all), len(trials_analyze)), np.nan)
+trial_frames, plot_t = f_get_frames(trial_win = [-0.05, .95], frame_rate = 1000/np.mean(f_get_values(data_out, 'volume_period')))
+corr_vals = np.full((len(data_out), len(trials_analyze)), np.nan)
 
-for n_fl in range(len(firing_rates_all)):
+for n_fl in range(len(data_out)):
     
-    stim_trig_resp = f_get_stim_trig_resp(firing_rates_all[n_fl], stim_times_all[n_fl], trial_frames = trial_frames)
-    trial_types = trial_types_all[n_fl]
+    stim_trig_resp = f_get_stim_trig_resp(data_out[n_fl]['firing_rates'], data_out[n_fl]['stim_times'], trial_frames=trial_frames)
+    trial_types = data_out[n_fl]['trial_types']
     resp_cells = resp_cells_all[n_fl]
     
     if 0:
@@ -94,7 +78,7 @@ for n_fl in range(len(firing_rates_all)):
                 if tn1==4:
                     plt.figure()
                     plt.imshow(SI)
-                    plt.title('isi = ' + str(isi_all[n_fl]))
+                    plt.title('isi = ' + str(data_out[n_fl]['isi']))
 
 if 0:
     plt.figure()
@@ -104,6 +88,7 @@ if 0:
     plt.plot(plot_t, np.mean(stim_trig_resp[92,:,trial_types==5], axis=0))
 
 #%%
+isi_all = f_get_values(data_out, 'isi')
 idx_uq = np.unique(isi_all)
 col1 = plt.colormaps['jet'](np.linspace(0, 1, 10))
 

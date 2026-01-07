@@ -48,98 +48,115 @@ def f_get_fnames_from_dir(dir_path, ext_list = [], tags = None):
 
 #%%
 
-def f_load_firing_rates(fpath, data_tag = 'results_cnmf_sort.mat', proc_tag = 'processed_data.mat', deconvolution='oasis', smooth_std_duration=0.1):
+def f_load_caim_data(data_dir, flist, data_tag = 'results_cnmf_sort.mat', proc_tag = 'processed_data.mat', deconvolution='oasis', smooth_std_duration=0.1):
     
     # deconvolution methods are either oasis (caiman default) or smoothdftd - smoothed, rectified first derivative
     
-    fpath2 = fpath.removesuffix('_results_cnmf_sort.mat')
+    num_files = len(flist)
+    data_out = []
     
-    dir_path, fname = os.path.split(fpath2)
+    for n_fl in range(num_files):
+        fpath = data_dir + flist[n_fl]
     
-    fname_core = fname
-    if data_tag in fname_core:
-        fname_core = fname_core.removesuffix(data_tag)
-    if proc_tag in fname_core:
-        fname_core = fname_core.removesuffix(proc_tag)
-    
-    flist_data = f_get_fnames_from_dir(dir_path, ext_list = ['.mat'], tags = [fname_core, data_tag])
-    fname_proc = f_get_fnames_from_dir(dir_path, ext_list = ['.mat'], tags = [fname_core, proc_tag])
-    
-    do_load = False
-    if len(fname_proc):
-        if len(flist_data):
-            do_load = True
+        dir_path, fname = os.path.split(fpath)
+        
+        fname_core = fname
+        if data_tag in fname_core:
+            fname_core = fname_core.removesuffix(data_tag)
+        if proc_tag in fname_core:
+            fname_core = fname_core.removesuffix(proc_tag)
+        
+        flist_data = f_get_fnames_from_dir(dir_path, ext_list = ['.mat'], tags = [fname_core, data_tag])
+        flist_proc = f_get_fnames_from_dir(dir_path, ext_list = ['.mat'], tags = [fname_core, proc_tag])
+        
+        do_load = False
+        if len(flist_proc):
+            if len(flist_data):
+                do_load = True
+            else:
+                print(fname_core + " data file with " + data_tag +  " tag not found, skipping")
         else:
-            print(fname_core + " data file with " + data_tag +  " tag not found, skipping")
-    else:
-        print(fname_core + " proc file with " + proc_tag +  " tag not found, skipping")
+            print(fname_core + " proc file with " + proc_tag +  " tag not found, skipping")
+        
+        
+        if do_load:
+            
+            data_slice = {'flist_data':       flist_data,
+                          'flist_proc':       flist_proc}
+            
+            f_proc = h5py.File(dir_path + '/' + flist_proc[0], 'r')
+            vid_cuts_trace = f_proc[f_proc['data']['file_cuts_params'][0][0]]['vid_cuts_trace'][()].flatten().astype(bool)
+            trial_types = f_proc['data']['trial_types'][()].flatten().astype(int)
+            stim_times = f_proc[f_proc['data']['stim_times_frame'][0][0]][()].flatten().astype(int)
+            
+            if 'volume_period' in f_proc['data']['frame_data'].keys():
+                data_slice['volume_period'] = f_proc['data']['frame_data']['volume_period'][()].flatten()[0]
+            if 'isi' in f_proc['data']['stim_params'].keys():
+                data_slice['isi'] = f_proc['data']['stim_params']['isi'][()].flatten()[0]
+            if 'MMN_orientations' in f_proc['data'].keys():
+                data_slice['MMN_ori'] = f_proc['data']['MMN_orientations'][()].flatten().astype(int)
+            if 'MMN_freq' in f_proc['data']['stim_params'].keys():
+                data_slice['MMN_ori'] = f_proc['data']['stim_params']['MMN_freq'][()].flatten().astype(int)
     
-    data_out = {'files_loaded':     do_load,
-                'flist_data':       flist_data,
-                'flist_proc':       fname_proc}
-    if do_load:
-        
-        f_proc = h5py.File(dir_path + '/' + fname_proc[0], 'r')
-        vid_cuts_trace = f_proc[f_proc['data']['file_cuts_params'][0][0]]['vid_cuts_trace'][()].flatten().astype(bool)
-        trial_types = f_proc['data']['trial_types'][()].flatten().astype(int)
-        stim_times = f_proc[f_proc['data']['stim_times_frame'][0][0]][()].flatten().astype(int)
-        
-        if 'volume_period' in f_proc['data']['frame_data'].keys():
-            data_out['volume_period'] = f_proc['data']['frame_data']['volume_period'][()].flatten()[0]
-        if 'isi' in f_proc['data']['stim_params'].keys():
-            data_out['isi'] = f_proc['data']['stim_params']['isi'][()].flatten()[0]
-        if 'MMN_orientations' in f_proc['data'].keys():
-            data_out['MMN_ori'] = f_proc['data']['MMN_orientations'][()].flatten().astype(int)
-        if 'MMN_freq' in f_proc['data']['stim_params'].keys():
-            data_out['MMN_ori'] = f_proc['data']['stim_params']['MMN_freq'][()].flatten().astype(int)
-
-        f_proc.close()
-        
-        firing_rates_all = []
-        dset_idx_all = []
-        
-        for n_fl in range(len(flist_data)):
-            fname_data = flist_data[n_fl]
-            f = h5py.File(dir_path + '/' + fname_data, 'r')
-        
-            d_est = f['est']
-            d_proc = f['proc']
+            f_proc.close()
             
-            comp_acc = d_proc['comp_accepted'][()].flatten().astype(bool)
+            firing_rates_all = []
+            dset_idx_all = []
             
-            if deconvolution == 'oasis':
-                firing_rates_cut = d_est['S'][()][:,comp_acc].T
-
-            elif deconvolution == 'smoothdfdt':
-                C = d_est['C'][()]
-                YrA = d_est['YrA'][()]
-                ca_traces_cut = (C + YrA)[:,comp_acc].T
-                firing_rates_cut = f_smooth_dfdt(ca_traces_cut, sigma_frames=1000/data_out['volume_period']*0.1, do_smooth=True)
+            for n_fl in range(len(flist_data)):
+                fname_data = flist_data[n_fl]
+                f = h5py.File(dir_path + '/' + fname_data, 'r')
             
-            firing_rates_cut = f_gauss_smooth(firing_rates_cut, sigma_frames=1000/data_out['volume_period']*smooth_std_duration)
+                d_est = f['est']
+                d_proc = f['proc']
+                
+                comp_acc = d_proc['comp_accepted'][()].flatten().astype(bool)
+                
+                if deconvolution == 'oasis':
+                    firing_rates_cut = d_est['S'][()][:,comp_acc].T
+    
+                elif deconvolution == 'smoothdfdt':
+                    C = d_est['C'][()]
+                    YrA = d_est['YrA'][()]
+                    ca_traces_cut = (C + YrA)[:,comp_acc].T
+                    firing_rates_cut = f_smooth_dfdt(ca_traces_cut, sigma_frames=1000/data_slice['volume_period']*0.1, do_smooth=True)
+                
+                firing_rates_cut = f_gauss_smooth(firing_rates_cut, sigma_frames=1000/data_slice['volume_period']*smooth_std_duration)
+                
+                peak_rate = np.max(firing_rates_cut, axis=1)[:,None]
+                firing_rates_cutn = firing_rates_cut/peak_rate
+                
+                firing_rates = np.zeros((firing_rates_cutn.shape[0], vid_cuts_trace.shape[0]))
+                firing_rates[:, vid_cuts_trace] = firing_rates_cutn
+                
+                firing_rates_all.append(firing_rates)
+                dset_idx_all.append(np.ones(firing_rates.shape[0], dtype=int)*(n_fl))
+                f.close()
             
-            peak_rate = np.max(firing_rates_cut, axis=1)[:,None]
-            firing_rates_cutn = firing_rates_cut/peak_rate
+            firing_rates = np.vstack(firing_rates_all)
+            dset_idx = np.hstack(dset_idx_all)
             
-            firing_rates = np.zeros((firing_rates_cutn.shape[0], vid_cuts_trace.shape[0]))
-            firing_rates[:, vid_cuts_trace] = firing_rates_cutn
-            
-            firing_rates_all.append(firing_rates)
-            dset_idx_all.append(np.ones(firing_rates.shape[0], dtype=int)*(n_fl))
-            f.close()
+            data_slice['firing_rates'] = firing_rates
+            data_slice['trial_types'] = trial_types
+            data_slice['stim_times'] = stim_times
+            data_slice['vid_cuts_trace'] = vid_cuts_trace
+            data_slice['files_loaded'] = do_load
+            data_slice['dset_idx'] = dset_idx
         
-        firing_rates = np.vstack(firing_rates_all)
-        dset_idx = np.hstack(dset_idx_all)
-        
-        data_out['firing_rates'] = firing_rates
-        data_out['trial_types'] = trial_types
-        data_out['stim_times'] = stim_times
-        data_out['vid_cuts_trace'] = vid_cuts_trace
-        data_out['files_loaded'] = do_load
-        data_out['dset_idx'] = dset_idx
+            data_out.append(data_slice)
         
     return data_out
     
+
+def f_get_values(data_out, key):
+    
+    values = []
+    
+    for data_slice in data_out:
+        if key in data_slice.keys():
+            values.append(data_slice[key])
+            
+    return values
 
 def f_smooth_dfdt(data, do_smooth=True, sigma_frames=1, rectify=True, normalize=True):
     

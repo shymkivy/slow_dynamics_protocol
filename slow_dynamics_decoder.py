@@ -6,62 +6,44 @@ Created on Wed Nov 26 12:00:33 2025
 """
 
 # ---- importing functions ----
-pipeline_dir = 'C:/Users/ys2605/Desktop/stuff/slow_dynamics_analysis'    # edit this  
-
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.spatial.distance import pdist, squareform
 
+# importing slow dynamics pipeline
+pipeline_dir = 'C:/Users/ys2605/Desktop/stuff/slow_dynamics_analysis'    # edit this  
 sys.path.append(pipeline_dir + '/functions')
-from f_sd_utils import f_get_fnames_from_dir, f_load_firing_rates, f_get_frames, f_get_stim_trig_resp
+from f_sd_utils import f_get_fnames_from_dir, f_load_caim_data, f_get_values, f_get_frames, f_get_stim_trig_resp, f_save_fig
 from f_sd_decoder import f_run_binwise_dec, f_plot_binwise_dec, f_shuffle_trials
-from f_sd_utils import f_save_fig
 
 #%% ---- loading mismatch datasets ----
 data_dir = 'F:/AC_data/caiman_data_missmatch/'    # edit this  
 # search for files to load using tags in the filename
 flist = f_get_fnames_from_dir(data_dir, ext_list = ['mat'], tags=['ammn', '_processed_data'])  # 'results_cnmf_sort'
 
-firing_rates_all = []
-trial_types_all = []
-stim_times_all = []
-mmn_ori_all = []
-volume_period_all = []
-
-# here you can limit how many datasets to analyze
-for n_fl in range(20):   # len(flist) or some number
-    # loading raw firing rates, trial types, and stimuli times
-    # here you can indicate to use oasis deconvolution or smoothdfdt
-    data_out = f_load_firing_rates(fpath=data_dir + flist[n_fl], deconvolution='oasis', smooth_std_duration=0)     # oasis, smoothdfdt; normally smooth with 0.1sec 
-    
-    # extract data and parameters we will use from each dataset
-    if data_out['files_loaded']:
-        firing_rates_all.append(data_out['firing_rates'])
-        trial_types_all.append(data_out['trial_types'])
-        stim_times_all.append(data_out['stim_times'])
-        mmn_ori_all.append(data_out['MMN_ori'])
-        volume_period_all.append(data_out['volume_period'])
+# loading raw firing rates, trial types, and stimuli times
+# here you can indicate to use oasis deconvolution or smoothdfdt
+data_out = f_load_caim_data(data_dir, flist[:20], deconvolution='oasis', smooth_std_duration=0)
 
 #%% ---- extracting trials using stimulus times ----
 # trial window to extract is indicated in seconds, also frame rate needs to be provided (assuming all datasets have similar frame rate)
-trial_frames, plot_t = f_get_frames(trial_win = [-1, 3], frame_rate=1000/np.mean(volume_period_all))
+trial_frames, plot_t = f_get_frames(trial_win = [-1, 3], frame_rate=1000/np.mean(f_get_values(data_out, 'volume_period')))
 
 stim_trig_resp_all = []
-for n_fl in range(len(firing_rates_all)):  
+for n_fl in range(len(data_out)):  
     # computing stimulus triggered average (neurons, frames, trials)
-    stim_trig_resp = f_get_stim_trig_resp(firing_rates_all[n_fl], stim_times_all[n_fl], trial_frames = trial_frames)
+    stim_trig_resp = f_get_stim_trig_resp(data_out[n_fl]['firing_rates'], data_out[n_fl]['stim_times'], trial_frames=trial_frames)
     stim_trig_resp_all.append(stim_trig_resp)
     
 #%% ---- training binwise decoder diagonally ----
 train_test_method = 'diag'     # training options: full, diag, train_at_stim, test_at_stim
-plot_legend = ('Data', 'Shuff')
 
 dec_data_all = []
-for n_fl in range(len(stim_trig_resp_all)):
+for n_fl in range(len(data_out)):
     print('Training dataset %d/%d' % (n_fl+1, len(stim_trig_resp_all)))
     stim_trig_resp = stim_trig_resp_all[n_fl]
-    trial_types = trial_types_all[n_fl]
+    trial_types = data_out[n_fl]['trial_types']
     trial_types_use = trial_types<=10
     
     X_all = [stim_trig_resp[:,:,trial_types_use], stim_trig_resp[:,:,trial_types_use]]
@@ -72,7 +54,7 @@ for n_fl in range(len(stim_trig_resp_all)):
     dec_data_all.append(dec_data)
 
 #%% ---- plotting decoder results ----
-figs_diag = f_plot_binwise_dec(dec_data_all, plot_t=plot_t, plot_legend=plot_legend, plot_start=-1, plot_end=3, title_tag='Freq single trial decoder')
+figs_diag = f_plot_binwise_dec(dec_data_all, plot_t=plot_t, plot_legend=('Data', 'Shuff'), plot_start=-1, plot_end=3, title_tag='Freq single trial decoder')
 
 # ---- save figure ----
 fig_dir = 'C:/Users/ys2605/Desktop/stuff/papers/AC_paper_protocol/figures/python'  # edit this  
@@ -84,30 +66,30 @@ if save_figs:
 train_test_method = 'full'          # full, diag, train_at_stim, test_at_stim
 n_fl = 0        # dataset to analyze
 
-trial_types_use = trial_types_all[n_fl]<=10
+trial_types_use = data_out[n_fl]['trial_types']<=10
 
 X_all = [stim_trig_resp_all[n_fl][:,:,trial_types_use], stim_trig_resp_all[n_fl][:,:,trial_types_use]]
-Y_all = [trial_types_all[n_fl][trial_types_use], f_shuffle_trials(trial_types_all[n_fl][trial_types_use])]
-plot_legend = ('Data', 'Shuff')
+Y_all = [data_out[n_fl]['trial_types'][trial_types_use], f_shuffle_trials(data_out[n_fl]['trial_types'][trial_types_use])]
 
 dec_data_full = f_run_binwise_dec(X_all, Y_all, train_test_method=train_test_method, pca_var_frac = 1, num_cv=5, normalize = False, add_noise_sigma=1e-5, log=True)
 
-figs_full = f_plot_binwise_dec(dec_data_full, plot_t=plot_t, plot_legend=plot_legend, plot_start=-1, plot_end=2, fixed_time=0.25, title_tag='Freq single trial decoder')
+figs_full = f_plot_binwise_dec(dec_data_full, plot_t=plot_t, plot_legend=('Data', 'Shuff'), plot_start=-1, plot_end=2, fixed_time=0.25, title_tag='Freq single trial decoder')
 
-# f_save_fig(figs_full['full'][0], path=fig_dir, name_tag='')
-# f_save_fig(figs_full['full'][1], path=fig_dir, name_tag='')
+if save_figs:
+    f_save_fig(figs_full['full'][0], path=fig_dir, name_tag='')
+    f_save_fig(figs_full['full'][1], path=fig_dir, name_tag='')
 
-# f_save_fig(figs_full['diag'], path=fig_dir, name_tag='')
-# f_save_fig(figs_full['fixed_train'], path=fig_dir, name_tag='')
-# f_save_fig(figs_full['fixed_test'], path=fig_dir, name_tag='')
+    f_save_fig(figs_full['diag'], path=fig_dir, name_tag='')
+    f_save_fig(figs_full['fixed_train'], path=fig_dir, name_tag='')
+    f_save_fig(figs_full['fixed_test'], path=fig_dir, name_tag='')
 
 #%% correlation stuff
 
-trial_frames, plot_t = f_get_frames(trial_win = [0.03, .95], frame_rate=1000/np.mean(volume_period_all))
+trial_frames, plot_t = f_get_frames(trial_win = [0.03, .95], frame_rate=1000/np.mean(f_get_values(data_out, 'volume_period')))
 stim_trig_resp_corr_all = []
-for n_fl in range(len(firing_rates_all)):  
+for n_fl in range(len(data_out)):  
     # computing stimulus triggered average (neurons, frames, trials)
-    stim_trig_resp = f_get_stim_trig_resp(firing_rates_all[n_fl], stim_times_all[n_fl], trial_frames = trial_frames)
+    stim_trig_resp = f_get_stim_trig_resp(data_out[n_fl]['firing_rates'], data_out[n_fl]['stim_times'], trial_frames = trial_frames)
     stim_trig_resp_corr_all.append(stim_trig_resp)
     
 #%% corr analysis
@@ -117,7 +99,7 @@ corr_vals = np.zeros((len(stim_trig_resp_corr_all), len(trials_analyze)))
 
 for n_fl in range(len(stim_trig_resp_corr_all)):
     stim_trig_resp = stim_trig_resp_corr_all[n_fl]
-    trial_types = trial_types_all[n_fl]
+    trial_types = data_out[n_fl]['trial_types']
     
     for n_tn in range(len(trials_analyze)):
         tn1 = trials_analyze[n_tn]
@@ -164,7 +146,7 @@ plt.plot(data_out['firing_rates'][1,:])
 plt.plot(data_out['ca_traces'][1,:]/np.max(data_out['ca_traces'][1,:]))
 
 
-x = np.mean(stim_trig_resp_all[n_fl][:,trial_types_all[n_fl] == 4,:], axis=1)
+x = np.mean(stim_trig_resp_all[n_fl][:,data_out[n_fl]['trial_types'] == 4,:], axis=1)
 plt.figure()
 plt.imshow(x.T)
 plt.ylabel('neurons')
