@@ -249,7 +249,7 @@ def f_shuffle_trials(trials):
 
 #%%
 
-def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, fixed_time=0.25, title_tag=''):
+def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, fixed_time=0.25, title_tag='', plot_single_trial=False):
     
     if type(dec_data_list) is not list:
         dec_data_list = [dec_data_list]
@@ -326,10 +326,12 @@ def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=
         
     elif train_test_method == 'diag':
         
-        fig1, ax1 = plt.subplots()
+        if plot_single_trial:
+            fig1, ax1 = plt.subplots()
         
         num_t, _, num_dec = dec_data_list[0]['performance'].shape
         traces_all = np.zeros((num_dsets, num_dec, len(plot_t2)))
+        
         
         for n_d in range(num_dsets):
             perform_train_test = dec_data_list[n_d]['performance']
@@ -337,13 +339,15 @@ def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=
 
             for n_dec in range(num_dec):
                 traces_all[n_d, n_dec, :] = perform_train_test[plt_start2:plt_end2,:,n_dec].flatten()
-                ax1.plot(plot_t2, perform_train_test[plt_start2:plt_end2,:,n_dec], color=colors1[n_dec])
-                
-        ax1.legend(plot_legend)
-        ax1.set_xlabel('Time (sec)')
-        ax1.set_ylabel('Performance')
-        ax1.set_title('%sbinwise, %s' % (title_tag2, train_test_method))
-        figures['diag'] = fig1
+                if plot_single_trial:
+                    ax1.plot(plot_t2, perform_train_test[plt_start2:plt_end2,:,n_dec], color=colors1[n_dec])
+        
+        if plot_single_trial:
+            ax1.legend(plot_legend)
+            ax1.set_xlabel('Time (sec)')
+            ax1.set_ylabel('Performance')
+            ax1.set_title('%sbinwise, %s' % (title_tag2, train_test_method))
+            figures['diag'] = fig1
         
         fig1, ax1 = plt.subplots()
         leg_lines = []

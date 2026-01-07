@@ -195,7 +195,7 @@ def f_get_frames(trial_win = [-0.05, .95], frame_rate = 30):
     frame_start = np.ceil(trial_win[0] * frame_rate)
     frame_end = np.ceil(trial_win[1] * frame_rate)
     trial_frames = [int(frame_start), int(frame_end)]
-    plot_t = np.arange(frame_start/frame_rate, frame_end/frame_rate, 1/frame_rate) 
+    plot_t = np.round(np.arange(frame_start/frame_rate, frame_end/frame_rate, 1/frame_rate), decimals=4)
     return trial_frames, plot_t
 
 def f_get_stim_trig_resp(firing_rates, stim_times, trial_frames = [-29, 85]):
@@ -209,7 +209,7 @@ def f_get_stim_trig_resp(firing_rates, stim_times, trial_frames = [-29, 85]):
     stim_trig_resp = np.zeros((num_cells, win_size, num_trials))
     
     for n_tr in range(num_trials):
-        cur_frame = round(stim_times[n_tr])
+        cur_frame = round(stim_times[n_tr]-1) # correct for matlab to python 
         stim_trig_resp[:,:,n_tr] = firing_rates[:,(cur_frame+trial_frames[0]):(cur_frame+trial_frames[1])]
     
     return stim_trig_resp
