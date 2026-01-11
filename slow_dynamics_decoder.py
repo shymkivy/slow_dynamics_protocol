@@ -24,7 +24,14 @@ flist = f_get_fnames_from_dir(data_dir, ext_list = ['mat'], tags=['ammn', '_proc
 
 # loading raw firing rates, trial types, and stimuli times
 # here you can indicate to use oasis deconvolution or smoothdfdt
-data_out = f_load_caim_data(data_dir, flist[:20], deconvolution='oasis', smooth_std_duration=0)
+data_out = f_load_caim_data(data_dir, flist[:20], deconvolution='oasis', smooth_std_duration=0.1)
+
+#%% ---- plot example raster ----
+plt.figure()
+plt.imshow(data_out[0]['firing_rates'][:,500:5000], aspect='auto', cmap='gist_yarg', vmin=0, vmax=.5, interpolation='none')
+plt.title('Raster')
+plt.ylabel('Neurons')
+plt.xlabel('Frames')
 
 #%% ---- extracting trials using stimulus times ----
 # trial window to extract is indicated in seconds, also frame rate needs to be provided (assuming all datasets have similar frame rate)
