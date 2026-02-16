@@ -12,7 +12,7 @@ from scipy.stats import norm
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-
+from scipy.sparse import csr_matrix
 
 #%%
 def f_get_fnames_from_dir(dir_path, ext_list = [], tags = None):
@@ -48,7 +48,7 @@ def f_get_fnames_from_dir(dir_path, ext_list = [], tags = None):
 
 #%%
 
-def f_load_caim_data(data_dir, flist, data_tag = 'results_cnmf_sort.mat', proc_tag = 'processed_data.mat', deconvolution='oasis', smooth_std_duration=0.1):
+def f_load_caim_data_mat(data_dir, flist, data_tag = 'results_cnmf_sort.mat', proc_tag = 'processed_data.mat', deconvolution='oasis', smooth_std_duration=0.1):
     
     # deconvolution methods are either oasis (caiman default) or smoothdftd - smoothed, rectified first derivative
     
@@ -56,18 +56,15 @@ def f_load_caim_data(data_dir, flist, data_tag = 'results_cnmf_sort.mat', proc_t
     data_out = []
     
     for n_fl in range(num_files):
-        fpath = data_dir + flist[n_fl]
-    
-        dir_path, fname = os.path.split(fpath)
-        
-        fname_core = fname
+
+        fname_core = flist[n_fl]
         if data_tag in fname_core:
             fname_core = fname_core.removesuffix(data_tag)
         if proc_tag in fname_core:
             fname_core = fname_core.removesuffix(proc_tag)
         
-        flist_data = f_get_fnames_from_dir(dir_path, ext_list = ['.mat'], tags = [fname_core, data_tag])
-        flist_proc = f_get_fnames_from_dir(dir_path, ext_list = ['.mat'], tags = [fname_core, proc_tag])
+        flist_data = f_get_fnames_from_dir(data_dir, ext_list = ['.mat'], tags = [fname_core, data_tag])
+        flist_proc = f_get_fnames_from_dir(data_dir, ext_list = ['.mat'], tags = [fname_core, proc_tag])
         
         do_load = False
         if len(flist_proc):
@@ -78,13 +75,12 @@ def f_load_caim_data(data_dir, flist, data_tag = 'results_cnmf_sort.mat', proc_t
         else:
             print(fname_core + " proc file with " + proc_tag +  " tag not found, skipping")
         
-        
         if do_load:
             
             data_slice = {'flist_data':       flist_data,
                           'flist_proc':       flist_proc}
             
-            f_proc = h5py.File(dir_path + '/' + flist_proc[0], 'r')
+            f_proc = h5py.File(data_dir + '/' + flist_proc[0], 'r')
             vid_cuts_trace = f_proc[f_proc['data']['file_cuts_params'][0][0]]['vid_cuts_trace'][()].flatten().astype(bool)
             trial_types = f_proc['data']['trial_types'][()].flatten().astype(int)
             stim_times = f_proc[f_proc['data']['stim_times_frame'][0][0]][()].flatten().astype(int)
@@ -105,7 +101,8 @@ def f_load_caim_data(data_dir, flist, data_tag = 'results_cnmf_sort.mat', proc_t
             
             for n_fl in range(len(flist_data)):
                 fname_data = flist_data[n_fl]
-                f = h5py.File(dir_path + '/' + fname_data, 'r')
+                
+                f = h5py.File(os.path.join(data_dir, fname_data), 'r')
             
                 d_est = f['est']
                 d_proc = f['proc']
@@ -146,7 +143,61 @@ def f_load_caim_data(data_dir, flist, data_tag = 'results_cnmf_sort.mat', proc_t
             data_out.append(data_slice)
         
     return data_out
+
+def f_load_caim_data(data_dir, flist, r_values_min = 0.5, min_SNR=1.5, thresh_cnn_min=0.8):
+    num_files = len(flist)
+    data_out = []
     
+    for n_fl in range(num_files):    # num_files
+        f = h5py.File(os.path.join(data_dir, flist[n_fl]), 'r')
+    
+        dims = f['dims'][()]
+    
+        est1 = f_h5_load_group(f['estimates'], keys=['C', 'S', 'YrA', 'SNR_comp', 'r_values', 'cnn_preds', 'idx_components', 'idx_components_bad'])
+        
+        A_data = f_h5_load_group(f['estimates']['A'])
+        est1['A'] = csr_matrix((A_data['data'], A_data['indices'], A_data['indptr']), shape=(A_data['shape'][1], A_data['shape'][0]))
+        est1['dims'] = dims
+        
+        bool_components = np.ones(est1['C'].shape[0], dtype=bool)
+        
+        bool_components_r = est1['r_values'] >= r_values_min
+        bool_components_snr = est1['SNR_comp'] > min_SNR
+        bool_components_cnn = est1['cnn_preds'] >= thresh_cnn_min
+        
+        bool_components = np.logical_and(bool_components, bool_components_r)
+        bool_components = np.logical_and(bool_components, bool_components_snr)
+        bool_components = np.logical_and(bool_components, bool_components_cnn)
+        
+        idx_components = np.where(bool_components)[0]
+        idx_components_bad = np.where(~bool_components)[0]
+        
+        # select good components
+        est2 = est1.copy()
+        for key1 in ['C', 'S', 'YrA', 'SNR_comp', 'r_values', 'cnn_preds', 'A']:
+            if len(est1[key1].shape) > 1:
+                est2[key1] = est1[key1][idx_components,:]
+            else:
+                est2[key1] = est1[key1][idx_components]
+        
+        est2['idx_components'] = idx_components
+        est2['idx_components_bad'] = idx_components_bad
+        
+        #A2 = est1['A'].toarray()
+        
+        data_out.append(est2)
+            
+    return data_out
+
+def f_h5_load_group(group, keys=None):
+    if keys is None:
+        keys = group.keys()
+        
+    data = {}
+    for key1 in keys:
+        data[key1] = group[key1][()]
+    
+    return data
 
 def f_get_values(data_out, key):
     

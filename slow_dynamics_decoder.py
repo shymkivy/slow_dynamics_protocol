@@ -14,7 +14,7 @@ from scipy.spatial.distance import pdist, squareform
 # importing slow dynamics pipeline
 pipeline_dir = 'C:/Users/ys2605/Desktop/stuff/slow_dynamics_analysis'    # edit this  
 sys.path.append(pipeline_dir + '/functions')
-from f_sd_utils import f_get_fnames_from_dir, f_load_caim_data, f_get_values, f_get_frames, f_get_stim_trig_resp, f_save_fig
+from f_sd_utils import f_get_fnames_from_dir, f_load_caim_data_mat, f_get_values, f_get_frames, f_get_stim_trig_resp, f_save_fig
 from f_sd_decoder import f_run_binwise_dec, f_plot_binwise_dec, f_shuffle_trials
 
 #%% ---- loading mismatch datasets ----
@@ -24,7 +24,7 @@ flist = f_get_fnames_from_dir(data_dir, ext_list = ['mat'], tags=['ammn', '_proc
 
 # loading raw firing rates, trial types, and stimuli times
 # here you can indicate to use oasis deconvolution or smoothdfdt
-data_out = f_load_caim_data(data_dir, flist[:20], deconvolution='oasis', smooth_std_duration=0.1)
+data_out = f_load_caim_data_mat(data_dir, flist[:20], deconvolution='oasis', smooth_std_duration=0.1)
 
 #%% ---- plot example raster ----
 plt.figure()
