@@ -9,107 +9,129 @@ Created on Fri Jan  2 18:11:13 2026
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.spatial.distance import pdist, squareform
 
 # importing slow dynamics pipeline
 pipeline_dir = 'C:/Users/ys2605/Desktop/stuff/slow_dynamics_analysis'    # edit this  
 sys.path.append(pipeline_dir + '/functions')
-from f_sd_utils import f_get_fnames_from_dir, f_load_caim_data_mat, f_get_values, f_get_frames, f_get_stim_trig_resp, f_compute_tuning, f_save_fig
+from f_sd_utils import f_load_caim_data_mat, f_get_values, f_get_frames, f_get_mouse_id, f_get_stim_trig_resp, f_compute_tuning, f_compute_correlation, f_plot_fig_isi_corr_trials, f_plot_fig_SI_mat, f_compute_correlation_mat, f_save_fig
+
+#%%
+# ---- Save figures as along the way ---- 
+save_figs = True  # can turn on or off to save figures or not
+fig_dir = 'C:/Users/ys2605/Desktop/stuff/papers/AC_paper_protocol/figures/python_corr'    # edit this
 
 #%% ---- loading echo data ----
-data_dir = 'F:/AC_data/caiman_data_echo/'
-# search for files to load using tags in the filename
-flist = f_get_fnames_from_dir(data_dir, ext_list = ['mat'], tags=['cont', '_processed_data'])
+data_dir = 'F:/AC_data/caiman_data_echo/'    # edit this
 
-# loading raw firing rates, trial types, and stimuli times
-# here you can indicate to use oasis deconvolution or smoothdfdt
-data_out = f_load_caim_data_mat(data_dir, flist, deconvolution='oasis', smooth_std_duration=0)
+# loading raw firing rates, trial types, and stimuli times from echo dataset
+data_echo = f_load_caim_data_mat(
+    data_dir,                            # data directory
+    ext_list=['mat'],                    # data extension
+    tags=['cont', '_processed_data'],    # data tags
+    num_files=None,                      # limit number of files to load
+    deconvolution='oasis',               # deconvolution oasis or smoothdfdt
+    smooth_std_duration=0.1)             # in sec
+
+frame_rate = 1000/np.mean(f_get_values(data_echo, 'volume_period')) # in Hz; edit this for external datasets
+isi_list = np.array(f_get_values(data_echo, 'isi'))
 
 #%% ---- calculate cell tuning and extract responsive cells ----
-# indicate a list of trial types to analyze. In this case the trial types are indexed from 1-10
-trials_analyze = np.arange(1,11)
 
-trial_frames, plot_t_tuning = f_get_frames(trial_win = [-1, 2], frame_rate = 1000/np.mean(f_get_values(data_out, 'volume_period')))
+trial_frames_tuning, plot_t_tuning = f_get_frames(
+    trial_win=[-1, 2],         # sec relative to stim onset (pre, post)
+    frame_rate=frame_rate)
 
 resp_cells_all = []
-for n_fl in range(len(data_out)):  
+for n_fl in range(len(data_echo)):  
     # computing stimulus triggered average (neurons, frames, trials)
-    stim_trig_resp = f_get_stim_trig_resp(data_out[n_fl]['firing_rates'], data_out[n_fl]['stim_times'], trial_frames=trial_frames)
-
-    print('computing stats dset %d/%d' % (n_fl+1, len(data_out)))
-    resp_cells = f_compute_tuning(stim_trig_resp, data_out[n_fl]['trial_types'], trials_analyze, plot_t_tuning, num_samp=2000, z_thresh = 3, sig_resp_win = [0, 1.2])
+    stim_trig_resp = f_get_stim_trig_resp(
+        data_echo[n_fl]['firing_rates'],    # firing rates
+        data_echo[n_fl]['stim_times'],      # stimulus onset frames
+        trial_frames=trial_frames_tuning)     # frames to be extracted
+    
+    print('computing stats dset %d/%d' % (n_fl+1, len(data_echo)))
+    resp_cells = f_compute_tuning(
+        stim_trig_resp,
+        data_echo[n_fl]['trial_types'],
+        np.arange(1,11), 
+        plot_t_tuning,
+        num_samp=2000,
+        z_thresh = 3,
+        sig_resp_win = [0, 1.2])
+    
     resp_cells_all.append(resp_cells)
+print('Done')
 
-#%% ---- corrrlation analysis echo ----
-trials_analyze = np.arange(1,11)
+#%% ---- corrrlation analysis CaIm echo data    ----
 
-trial_frames, plot_t = f_get_frames(trial_win = [-0.05, .95], frame_rate = 1000/np.mean(f_get_values(data_out, 'volume_period')))
-corr_vals = np.full((len(data_out), len(trials_analyze)), np.nan)
+trial_frames, plot_t = f_get_frames(
+    trial_win = [-0.05, .95],         # sec relative to stim onset (pre, post)
+    frame_rate = frame_rate)
 
-for n_fl in range(len(data_out)):
+corr_vals_all = []
+stim_trig_resp_all = []
+for n_fl in range(len(data_echo)):
     
-    stim_trig_resp = f_get_stim_trig_resp(data_out[n_fl]['firing_rates'], data_out[n_fl]['stim_times'], trial_frames=trial_frames)
-    trial_types = data_out[n_fl]['trial_types']
-    resp_cells = resp_cells_all[n_fl]
+    stim_trig_resp = f_get_stim_trig_resp(
+        data_echo[n_fl]['firing_rates'],    # firing rates
+        data_echo[n_fl]['stim_times'],      # stimulus onset frames
+        trial_frames=trial_frames)          # frames to be extracted
     
-    if 0:
-        stim_trig_resp = stim_trig_resp - np.mean(stim_trig_resp)
+    stim_trig_resp_all.append(stim_trig_resp)
+    
+    corr_vals = f_compute_correlation(
+        stim_trig_resp,                     # stimulus triggered response matrix
+        data_echo[n_fl]['trial_types'],     # vector of trial types
+        np.arange(1,11),                    # trials types to analyze (1-10)
+        resp_cells_all[n_fl],               # logical vector of responsive cells
+        metric='correlation',               # cosine, correlation
+        min_resp_cells=5)                   # minimum number of responsive cells
+    
+    corr_vals_all.append(corr_vals)
 
-    if 1:   # add some uncorrelated noise to add stability
-        stim_trig_resp = stim_trig_resp + np.random.normal(0, 1e-5, size=stim_trig_resp.shape)
-    
-    resp_marg = np.sum(resp_cells, axis=1).astype(bool)
-    for n_tn in range(len(trials_analyze)):
-        
-        if sum(resp_cells[:,n_tn]) > 5:
-            tn1 = trials_analyze[n_tn]
-            tr_idx = trial_types == tn1
-            
-            stim_trig_resp2 = stim_trig_resp[:,:,tr_idx]
-            stim_trig_resp3 = stim_trig_resp2[resp_marg,:,:]
-            stim_trig_resp4 = np.mean(stim_trig_resp3, axis=1)
-            
-            distances = squareform(pdist(stim_trig_resp4.T, metric='correlation'))     # cosine, correlation
-            SI = 1 - distances
-            SI2 = np.tril(SI, k=-1)
-            corr_vals[n_fl, n_tn] = np.mean(SI2[SI2.astype(bool)])
-            
-            if 0:
-                if tn1==4:
-                    plt.figure()
-                    plt.imshow(SI)
-                    plt.title('isi = ' + str(data_out[n_fl]['isi']))
+corr_vals = np.vstack(corr_vals_all)
 
 if 0:
     plt.figure()
     plt.imshow(corr_vals)
     
     plt.figure()
-    plt.plot(plot_t, np.mean(stim_trig_resp[92,:,trial_types==5], axis=0))
+    plt.plot(plot_t, np.mean(stim_trig_resp[90,:,data_echo[n_fl]['trial_types']==5], axis=0))
 
 #%%
-isi_all = f_get_values(data_out, 'isi')
-idx_uq = np.unique(isi_all)
-col1 = plt.colormaps['jet'](np.linspace(0, 1, 10))
+#  ---- plot correlation for trials 1-10 across ISI ----
+fig = f_plot_fig_isi_corr_trials(
+    corr_vals,
+    isi_list,
+    colormap='jet',
+    metric_tag = 'Correlation')
 
-plt.figure()
-corr_tn_all = np.zeros((len(trials_analyze), len(idx_uq)))
-for n_tn in range(len(trials_analyze)):
-    corr_tn = np.full(len(idx_uq), np.nan)
-    for n_isi in range(len(idx_uq)):
-        idx1 = (idx_uq[n_isi] == np.array(isi_all)).flatten()
-        if np.sum(~np.isnan(corr_vals[idx1,n_tn])):
-            corr_tn[n_isi] = np.nanmean(corr_vals[idx1,n_tn])
-            corr_tn_all[n_tn, n_isi] = np.nanmean(corr_vals[idx1,n_tn])
-    if np.sum(~np.isnan(corr_tn)):
-        plt.plot(idx_uq, corr_tn, '-o', color=col1[n_tn])
+# ---- save figure ----
+if save_figs:    
+    f_save_fig(fig, path=fig_dir, name_tag='Corr fig')
     
-plt.plot(idx_uq, np.nanmean(corr_tn_all, axis=0), '-o', color='k')
+#%%
+mouse_list = np.array(f_get_mouse_id(data_echo))
+mouse_tag = np.unique(mouse_list)[5]
+n_freq = 5
 
+isi_uq = np.unique(isi_list)
+SI_list = []
 
+for n_isi in range(len(isi_uq)):
+    mouse_idx2 = np.where((mouse_list == mouse_tag) & (isi_list == isi_uq[n_isi]))[0][0]
+    trial_idx = data_echo[mouse_idx2]['trial_types'] == n_freq
+    
+    stim_trig_resp = stim_trig_resp_all[mouse_idx2][:,:,trial_idx]
+    
+    SI = f_compute_correlation_mat(stim_trig_resp, subtract_mean=True, add_noise_sigma=1e-5, metric='cosine')
+    SI_list.append(SI)
+    
+#%%
 
+fig = f_plot_fig_SI_mat(SI_list, isi_uq, title_tag = 'mouse %s, freq %d' % (mouse_tag, n_freq))
 
-
-if 0:
-    plt.figure()
-    plt.imshow(col1[:,None,:3])
+# ---- save figure ----
+if save_figs:    
+    f_save_fig(fig, path=fig_dir, name_tag='Corr SI mat')
+    

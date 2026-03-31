@@ -83,7 +83,7 @@ def f_sample_trial_data_dec(rates_in, stim_loc, trial_types):
 
 #%%
 
-def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, num_cv=5, fixed_time=0, add_noise_sigma=0.1, normalize = True, get_train_coeffs=False, log=False):
+def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, num_cv=5, fixed_time=0, add_noise_sigma=0.1, normalize = True, normalize_joint = False, get_train_coeffs=False, log=False, shuffle_trial_order=False, verbose=False):
     num_dset = len(X_all)
     
     num_cells, num_t_bins, num_trials = X_all[0].shape
@@ -122,7 +122,13 @@ def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, nu
                 X_use1 = X_use[n_cell,:,:]
                 X_use2 = X_use1 - np.mean(X_use1)
                 X_use[n_cell,:,:] = X_use2/np.std(X_use2)
-
+    
+        if normalize_joint:
+            X_use1 = X_use - np.mean(X_use)
+            X_use2 = X_use1 - np.mean(X_use1)
+            X_use = X_use2
+        
+        
         if pca_var_frac < 1 and pca_var_frac !=0:
             
             X_use2d = np.reshape(X_use, (num_cells, num_t_bins*num_trials), order = 'F')
@@ -154,9 +160,21 @@ def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, nu
                 train_idx = ~test_idx
                 
                 X_train2 = X_train[:,train_idx]
+                y_data3 = y_data2[train_idx]
                 
-                svc = svm.SVC(kernel='linear', C=1,gamma='auto') # ,verbose=True , probability=True
-                svc.fit(X_train2.T, y_data2[train_idx])
+                if shuffle_trial_order:
+                    trials_idx = np.arange(y_data3.shape[0])
+                    np.random.shuffle(trials_idx)
+                    
+                    X_train3 = X_train2[:,trials_idx]
+                    y_data4 = y_data3[trials_idx]
+                else:
+                    X_train3 = X_train2
+                    y_data4 = y_data3
+                
+                #svc = svm.LinearSVC(C=1,verbose=verbose) # ,verbose=True , probability=True
+                svc = svm.SVC(kernel='linear', C=1,gamma='auto',verbose=verbose) # ,verbose=True , probability=True
+                svc.fit(X_train3.T, y_data4)
                 
                 if get_train_coeffs:
                     train_coeffs[:,n_bin,n_cv,:,n_dset] = svc.coef_.T 
@@ -249,15 +267,14 @@ def f_shuffle_trials(trials):
 
 #%%
 
-def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, fixed_time=0.25, title_tag='', plot_single_trial=False):
+def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, fixed_time=0.25, axis=None, title_tag='', plot_single_trial=False):
     
     if type(dec_data_list) is not list:
         dec_data_list = [dec_data_list]
     
     plt_start2 = np.argmin(np.abs(plot_start - plot_t))
     plt_end2 = np.argmin(np.abs(plot_end - plot_t))
-    plot_cond2 = np.argmin(np.abs(fixed_time - plot_t))
-
+    
     plot_t2 = plot_t[plt_start2:plt_end2]
     
     colors1 = ['lightblue', 'gray']
@@ -276,6 +293,8 @@ def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=
     
     if train_test_method == 'full':
         
+        plot_cond2 = np.argmin(np.abs(fixed_time - plot_t))
+        
         for n_d in range(num_dsets):
             perform_train_test = dec_data_list[n_d]['performance']
             num_t, _, num_dec = perform_train_test.shape
@@ -289,9 +308,9 @@ def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=
                 ax1.set_xlabel('Test time')
                 ax1.set_ylabel('Train time')
                 if len(title_tag):
-                    ax1.set_title('%s; %s' % (title_tag, plot_legend[n_dec]))
+                    ax1.set_title('%s; %s' % (title_tag, if_get_leg(dec_data_list[n_d], plot_legend)[n_dec]))
                 else:
-                    ax1.set_title(plot_legend[n_dec])
+                    ax1.set_title(if_get_leg(dec_data_list[n_d], plot_legend)[n_dec])
                 cbar = fig1.colorbar(im1)
                 cbar.set_label('Performance')
                 figures['full'].append(fig1)
@@ -300,7 +319,7 @@ def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=
             fig1, ax1 = plt.subplots()
             for n_dec in range(num_dec):
                 ax1.plot(plot_t2, np.diag(perform_train_test[plt_start2:plt_end2,plt_start2:plt_end2,n_dec]))
-            ax1.legend(plot_legend)
+            ax1.legend(if_get_leg(dec_data_list[n_d], plot_legend))
             ax1.set_xlabel('Time (sec)')
             ax1.set_ylabel('Performance')
             ax1.set_title('%sbinwise, %s' % (title_tag2, train_test_method))
@@ -309,7 +328,7 @@ def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=
             fig1, ax1 = plt.subplots()
             for n_dec in range(num_dec):
                 ax1.plot(plot_t2, perform_train_test[plot_cond2,plt_start2:plt_end2,n_dec])
-            ax1.legend(plot_legend)
+            ax1.legend(if_get_leg(dec_data_list[n_d], plot_legend))
             ax1.set_xlabel('Time (sec)')
             ax1.set_ylabel('Performance')
             ax1.set_title('%sbinwise, %s, train at %.2fsec, test variable' % (title_tag2, train_test_method, plot_t[plot_cond2]))
@@ -318,7 +337,7 @@ def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=
             fig1, ax1 = plt.subplots()
             for n_dec in range(num_dec):
                 ax1.plot(plot_t2, perform_train_test[plt_start2:plt_end2,plot_cond2,n_dec])
-            ax1.legend(plot_legend)
+            ax1.legend(if_get_leg(dec_data_list[n_d], plot_legend))
             ax1.set_xlabel('Time (sec)')
             ax1.set_ylabel('Performance')
             ax1.set_title('%sbinwise, %s, train variable, test at %.2fsec' % (title_tag2, train_test_method, plot_t[plot_cond2]))
@@ -331,19 +350,21 @@ def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=
         
         num_t, _, num_dec = dec_data_list[0]['performance'].shape
         traces_all = np.zeros((num_dsets, num_dec, len(plot_t2)))
-        
+        leg_all = []
         
         for n_d in range(num_dsets):
             perform_train_test = dec_data_list[n_d]['performance']
             num_t, _, num_dec = perform_train_test.shape
-
+            leg_all.append(if_get_leg(dec_data_list[n_d], plot_legend))
             for n_dec in range(num_dec):
                 traces_all[n_d, n_dec, :] = perform_train_test[plt_start2:plt_end2,:,n_dec].flatten()
+                
                 if plot_single_trial:
                     ax1.plot(plot_t2, perform_train_test[plt_start2:plt_end2,:,n_dec], color=colors1[n_dec])
         
+        
         if plot_single_trial:
-            ax1.legend(plot_legend)
+            ax1.legend(if_get_leg(dec_data_list[n_d], plot_legend))
             ax1.set_xlabel('Time (sec)')
             ax1.set_ylabel('Performance')
             ax1.set_title('%sbinwise, %s' % (title_tag2, train_test_method))
@@ -358,7 +379,7 @@ def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=
             leg_lines.append(l1)
             ax1.fill_between(plot_t2, mean_trace-sem_trace, mean_trace+sem_trace, color=colors_mean[n_dec], alpha=0.2)
         
-        ax1.legend(handles=leg_lines, labels=plot_legend)
+        ax1.legend(handles=leg_lines, labels=if_get_leg(dec_data_list[n_d], plot_legend))
         ax1.set_xlabel('Time (sec)')
         ax1.set_ylabel('Performance')
         ax1.set_title('%sbinwise, %s' % (title_tag2, train_test_method))
@@ -370,6 +391,100 @@ def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=
         1
         
     return figures
+
+def if_get_leg(dec, f_leg):
+    if 'legend' in dec:
+        leg = dec['legend']
+    elif f_leg is not None:
+        leg = f_leg
+    
+    return leg
+
+
+def f_plot_diag_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, axis=None, title_tag='', colors = ['blue', 'black']):
+    
+    
+    if type(dec_data_list) is not list:
+        if type(dec_data_list) is not np.ndarray:
+            dec_data_list = [dec_data_list]
+    
+    plt_start2 = np.argmin(np.abs(plot_start - plot_t))
+    plt_end2 = np.argmin(np.abs(plot_end - plot_t))
+    
+    plot_t2 = plot_t[plt_start2:plt_end2]
+    
+    # label='Alpha 0.6
+
+    num_dsets = len(dec_data_list)
+    
+    num_t, _, num_dec = dec_data_list[0]['performance'].shape
+    traces_all = np.zeros((num_dsets, num_dec, len(plot_t2)))
+    
+    for n_d in range(num_dsets):
+        perform_train_test = dec_data_list[n_d]['performance']
+        num_t, _, num_dec = perform_train_test.shape
+        for n_dec in range(num_dec):
+            traces_all[n_d, n_dec, :] = perform_train_test[plt_start2:plt_end2,:,n_dec].flatten()
+            
+    if axis is None:
+        fig1, axis = plt.subplots()
+    
+    leg_lines = []
+    for n_dec in range(num_dec):
+        mean_trace = np.mean(traces_all[:, n_dec, :], axis=0)
+        sem_trace = np.std(traces_all[:, n_dec, :], axis=0)/np.max([np.sqrt(num_dsets-1), 1])
+        l1, = axis.plot(plot_t2, mean_trace, color=colors[n_dec])
+        leg_lines.append(l1)
+        axis.fill_between(plot_t2, mean_trace-sem_trace, mean_trace+sem_trace, color=colors[n_dec], alpha=0.2)
+    
+    if plot_legend is not None:
+        axis.legend(handles=leg_lines, labels=plot_legend)
+    axis.set_xlabel('Time (sec)')
+    axis.set_ylabel('Performance')
+    if len(title_tag):
+        axis.set_title(title_tag)
+           
+    return axis
+
+def f_plot_full_binwise_dec(dec_data, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, axis=None, title_tag='', clim=[0, 1], clim_width_ratio = 10, figsize=(17, 3.5)):
+    
+
+    plt_start2 = np.argmin(np.abs(plot_start - plot_t))
+    plt_end2 = np.argmin(np.abs(plot_end - plot_t))
+    
+    plot_t2 = plot_t[plt_start2:plt_end2]
+    
+    # label='Alpha 0.6
+
+    perform_train_test = dec_data['performance']
+    num_t, _, num_dec = perform_train_test.shape
+    
+    if axis is None:
+        fig, ax1 = plt.subplots(1, num_dec+1, gridspec_kw={'width_ratios': list(np.ones(num_dec)*clim_width_ratio) + [1]}, figsize=figsize)
+    else:
+        ax1 = axis
+    
+    for n_dec in range(num_dec):
+        perform_train_test[plt_start2:plt_end2,plt_start2:plt_end2,n_dec]
+    
+    for n_dec in range(num_dec):
+        
+        im1 = ax1[n_dec].imshow(perform_train_test[plt_start2:plt_end2,plt_start2:plt_end2,n_dec], extent=(np.min(plot_t2), np.max(plot_t2), np.max(plot_t2), np.min(plot_t2)), clim=clim)
+        #ax1.set_clim([0, 1])
+        ax1[n_dec].set_xlabel('Test time')
+        ax1[n_dec].set_ylabel('Train time')
+        if len(title_tag):
+            ax1[n_dec].set_title('%s; %s' % (title_tag, if_get_leg(dec_data, plot_legend)[n_dec]))
+        else:
+            axis[n_dec].set_title(plot_legend)
+    if len(ax1) > num_dec:
+        plt.colorbar(im1, cax=axis.flatten()[-1])
+        ax1.flatten()[-1].set_ylabel('Performance')
+        
+        #cbar = fig.colorbar(im1)
+        #cbar.set_label('Performance')   
+    if axis is None:
+        return fig
 
 #%%
 def f_run_one_shot_dec(x_data, y_data, trial_stim_on=[], shuff_stim_type=[], shuff_bins=[], stim_on_train=True, num_cv=5, equalize_y_input=True):
