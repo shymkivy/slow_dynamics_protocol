@@ -22,7 +22,7 @@ from f_sd_decoder import f_run_binwise_dec, f_plot_diag_binwise_dec, f_plot_full
 # rates (time, run, neurons)
 
 data_dir = 'F:/RNN_stuff/RNN_data/test_data/'
-fname = 'test_data_2024_5_24_9h_42m'
+fname = 'RNN_test_data_2024_5_24_9h_42m'
 data_rnn = f_load_rnn_test(
     data_dir, 
     fname + '_cont_data.npy',

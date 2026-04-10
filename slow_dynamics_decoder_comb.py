@@ -42,10 +42,10 @@ frame_rate = 1000/np.mean(f_get_values(data_ob, 'volume_period')) # in Hz; edit 
 # all three were tested with control inputs and neuronal activity was extracted
 
 data_dir_rnn = 'F:/RNN_stuff/RNN_data/test_data/'
-fname_rnn = 'test_data_2024_5_24_9h_42m'
+fname_rnn = 'RNN_test_data_2024_5_24_9h_42m2'
 data_rnn = f_load_rnn_test(
     data_dir_rnn, 
-    fname_rnn + '_cont_data.npy',
+    fname_rnn + '_cont_data.npy',       # cont_data, ob_data
     fname_rnn + '_params.npy',
     max_net_load = 5,
     flatten_runs = True,

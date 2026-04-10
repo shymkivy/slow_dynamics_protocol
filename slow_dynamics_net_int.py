@@ -39,7 +39,7 @@ frame_rate = 1000/np.mean(f_get_values(data_ob, 'volume_period')) # in Hz; edit 
 # three types of RNNs trainings: odball recognition, control freq recognition, and untrained
 # all three were tested with control inputs and neuronal activity was extracted
 data_dir_rnn = 'F:/RNN_stuff/RNN_data/test_data/'
-fname_rnn = 'test_data_2024_5_24_9h_42m'
+fname_rnn = 'RNN_test_data_2024_5_24_9h_42m'
 data_rnn = f_load_rnn_test(
     data_dir_rnn, 
     fname_rnn + '_cont_data.npy',

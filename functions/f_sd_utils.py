@@ -495,10 +495,25 @@ def f_load_rnn_test(data_dir, fname_data, fname_params, max_net_load = 999, limi
     data_key = list(test_data_load.keys())[0]
     test_data_load_all = test_data_load[data_key]
     
+    # for n1 in range(len(test_data_load_all)):
+    #     for n2 in range(len(test_data_load_all[n1])):
+    #         del test_data_load_all[n1][n2]['input']
+    #         del test_data_load_all[n1][n2]['target']
+    #         del test_data_load_all[n1][n2]['output']
+    # test_data_load_all[0][0].keys()
+    # test_data_load_all[0][0]['loss'].shape
+    # np.save(data_dir + 'RNN_test_data_2024_5_24_9h_42m_ob_data2.npy', test_data_load)
+    
     deets_load = np.load(data_dir + fname_params, allow_pickle=True).item()
     params_all = deets_load['params_all']
     params_test = deets_load['params_test']
-    
+    # deets_load['ob_data'].keys()
+    # del deets_load['ob_data']['input_oddball']
+    # del deets_load['ob_data']['target_oddball_freq']
+    # del deets_load['cont_data']['input_control']
+    # del deets_load['cont_data']['target_control']
+    # np.save(data_dir + 'RNN_test_data_2024_5_24_9h_42m2_params.npy', deets_load)
+     
     data_all = []
     
     use_net_type_lim = False
@@ -865,7 +880,7 @@ def f_plot_fig_diag_decoder(dec_data_all, dec_data_all_rnn, training_type, plot_
     
     return fig_diag
 
-def f_plot_fig_full_decoder_caim(dec_data_full, plot_t):
+def f_plot_fig_full_decoder_caim(dec_data_full, plot_t, clim=[0, 0.5]):
     
     # ---- Rlotting full decoder results CaIm data ----
     fig_full, ax = plt.subplots(1, 3, gridspec_kw={'width_ratios': [20, 20, 1]}, figsize=(12, 5.7), layout='constrained')
@@ -880,7 +895,7 @@ def f_plot_fig_full_decoder_caim(dec_data_full, plot_t):
         plot_legend=('Data', 'Shuff'),
         plot_start=-1,
         plot_end=2,
-        clim=[0, 0.5],
+        clim=clim,
         axis=ax,
         title_tag='')
     
