@@ -501,7 +501,7 @@ def f_load_rnn_test(data_dir, fname_data, fname_params, max_net_load = 999, limi
     #         del test_data_load_all[n1][n2]['target']
     #         del test_data_load_all[n1][n2]['output']
     # test_data_load_all[0][0].keys()
-    # test_data_load_all[0][0]['loss'].shape
+    # test_data_load_all[0][0]['rates'].shape
     # np.save(data_dir + 'RNN_test_data_2024_5_24_9h_42m_ob_data2.npy', test_data_load)
     
     deets_load = np.load(data_dir + fname_params, allow_pickle=True).item()

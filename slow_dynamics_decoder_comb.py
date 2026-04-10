@@ -45,7 +45,7 @@ data_dir_rnn = 'F:/RNN_stuff/RNN_data/test_data/'
 fname_rnn = 'RNN_test_data_2024_5_24_9h_42m2'
 data_rnn = f_load_rnn_test(
     data_dir_rnn, 
-    fname_rnn + '_ob_data.npy',       # cont_data, ob_data
+    fname_rnn + '_cont_data.npy',       # _cont_data, _ob_data
     fname_rnn + '_params.npy',
     max_net_load = 5,
     flatten_runs = True,
