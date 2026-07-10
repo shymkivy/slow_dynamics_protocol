@@ -99,6 +99,7 @@ def run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, num_
     if num_trials < num_cv:
         raise ValueError('num_trials=%d is less than num_cv=%d; reduce num_cv (cross-validation folds).' % (num_trials, num_cv))
 
+    # 'diag': test only at the trained bin; 'full': test each trained bin against all bins (temporal generalization)
     if train_test_method == 'full':
         train_t_idx = np.arange(num_t_bins)
         test_t_idx = np.repeat(np.arange(num_t_bins).reshape((1,num_t_bins)), num_t_bins, axis=0)
@@ -140,10 +141,11 @@ def run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, num_
             X_use = X_use2
         
         
+        # optional PCA: keep the leading components that explain pca_var_frac of the variance
         if pca_var_frac < 1 and pca_var_frac !=0:
-            
+
             X_use2d = np.reshape(X_use, (num_cells, num_t_bins*num_trials), order = 'F')
-            
+
             U, S, Vh = linalg.svd(X_use2d.T, full_matrices=False)
             cum_var = np.cumsum(S**2/np.sum(S**2))
             comp_include_idx = np.where(cum_var > pca_var_frac)[0][0]+1

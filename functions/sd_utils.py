@@ -323,6 +323,7 @@ def get_stim_trig_resp(firing_rates, stim_times, trial_frames = [-29, 85]):
         raw_start = cur_frame + trial_frames[0]
         raw_end = cur_frame + trial_frames[1]
 
+        # clamp the window to the recording bounds; trials near the edges stay zero-padded
         src_start = np.max([raw_start, 0])
         src_end = np.min([raw_end, T])
 
@@ -396,7 +397,7 @@ def compute_tuning(stim_trig_resp, trial_types, trials_analyze, plot_t, num_samp
             trial_ave1 = np.mean(stim_trig_resp_use[:,:,tt1_idx], axis=2)
             peak_vals[:,n_tt], peak_locs[:,n_tt] = get_trial_peak(trial_ave1, peak_size=3)
     
-    # make shuffled dist
+    # null distribution of peaks from random trial resamples (with replacement)
     trials_per_stim = np.zeros(num_tt, dtype=int)
     for n_tt in range(num_tt):
         trials_per_stim[n_tt] = np.sum(trial_types_use == trials_analyze[n_tt])
@@ -415,7 +416,8 @@ def compute_tuning(stim_trig_resp, trial_types, trials_analyze, plot_t, num_samp
     peak_locs_t[:,idx1] = plot_t[peak_locs[:,idx1].astype(int)]
     
     peak_in_resp_win = np.logical_and(peak_locs_t >= sig_resp_win[0], peak_locs_t <= sig_resp_win[1])
-    
+
+    # responsive if the observed peak exceeds the z-threshold percentile of the null and peaks within the response window
     peak_prcntle = norm.cdf(z_thresh)*100
     prc_thresh = np.percentile(samp_peak_vals, peak_prcntle, axis=1)
     resp_cells_peak = np.zeros((num_cells, num_tt), dtype=bool)
@@ -470,6 +472,7 @@ def compute_correlation(stim_trig_resp, trial_types, trials_analyze, resp_cells=
                 stim_trig_resp5 = stim_trig_resp4
             
             distances = squareform(pdist(stim_trig_resp5.T, metric=metric))     # cosine, correlation
+            # trial-to-trial similarity = 1 - distance; average over the unique trial pairs (lower triangle)
             SI = 1 - distances
             SI2 = np.tril(SI, k=-1)
             SI2_vals = SI2[SI2.astype(bool)]
@@ -514,6 +517,7 @@ def get_trace_tau(trace, sm_bin = 0):
     #trial_len = out_temp_all.shape[1]
     
     
+    # z-score the trace so the zero-lag autocorrelation equals 1 (half-max crossing = 0.5)
     tracen = trace - np.mean(trace)
     trace_std = np.std(tracen)
     if trace_std == 0:
@@ -533,7 +537,7 @@ def get_trace_tau(trace, sm_bin = 0):
     else:
         corr1_smn = corr1
     
-    corr1_smn2 = corr1_smn[len(trace)-1:]
+    corr1_smn2 = corr1_smn[len(trace)-1:]     # positive lags only (zero lag is at index len-1)
     
     # plt.figure(); plt.plot(corr1)
     
