@@ -14,19 +14,20 @@ from scipy.spatial.distance import pdist, squareform
 # importing slow dynamics pipeline
 pipeline_dir = 'C:/Users/ys2605/Desktop/stuff/slow_dynamics_analysis'    # edit this  
 sys.path.append(pipeline_dir + '/functions')
-from f_sd_utils import f_load_caim_data_mat, f_get_values, f_get_frames, f_get_stim_trig_resp, f_save_fig
-from f_sd_decoder import f_run_binwise_dec, f_plot_full_binwise_dec, f_plot_diag_binwise_dec, f_shuffle_trials
+import sd_utils as sd
+import sd_decoder as dec
 
 #%%
 save_figs = False  # can turn on or off to save figure or not
 fig_dir = 'C:/Users/ys2605/Desktop/stuff/papers/AC_paper_protocol/figures/python'    # edit this
+seed = 0           # integer for reproducible results, or None for random
 
 #%% ---- loading mismatch datasets ----
-# for external datasets theses steps need to be modified
+# for external datasets these steps need to be modified
 data_dir = 'F:/AC_data/caiman_data_missmatch/'   # edit this 
 
 # loading raw firing rates, trial types, and stimuli times from oddball dataset
-data_ob = f_load_caim_data_mat(
+data_ob = sd.load_caim_data_mat(
     data_dir,                            # data directory
     ext_list=['mat'],                    # data extension
     tags=['ammn', '_processed_data'],    # data tags
@@ -34,7 +35,7 @@ data_ob = f_load_caim_data_mat(
     deconvolution='oasis',               # deconvolution oasis or smoothdfdt
     smooth_std_duration=0.1)             # in sec
 
-frame_rate = 1000/np.mean(f_get_values(data_ob, 'volume_period')) # in Hz; edit this for external datasets
+frame_rate = 1000/np.mean(sd.get_values(data_ob, 'volume_period')) # in Hz; edit this for external datasets
 
 #%% ---- plot example raster ----
 fig = plt.figure()
@@ -45,18 +46,18 @@ plt.xlabel('Frames')
 
 # ---- save figure ----
 if save_figs:    
-    f_save_fig(fig, path=fig_dir, name_tag='Raster')
+    sd.save_fig(fig, path=fig_dir, name_tag='Raster')
 
 #%% ---- extracting trials using stimulus times ----
 # compute trial window frames (assuming all datasets have similar frame rate)
-trial_frames, plot_t = f_get_frames(
+trial_frames, plot_t = sd.get_frames(
     trial_win=[-1,3],         # sec relative to stim onset (pre, post)
     frame_rate=frame_rate)
 
 # computing stimulus triggered average (neurons, frames, trials)
 stim_trig_resp_all = []
 for n_fl in range(len(data_ob)):  
-    stim_trig_resp = f_get_stim_trig_resp(
+    stim_trig_resp = sd.get_stim_trig_resp(
         data_ob[n_fl]['firing_rates'],    # firing rates
         data_ob[n_fl]['stim_times'],      # stimulus onset frames
         trial_frames=trial_frames)        # frames to be extracted
@@ -64,14 +65,16 @@ for n_fl in range(len(data_ob)):
     stim_trig_resp_all.append(stim_trig_resp)
     
 #%% ---- define diagonal binwise decoder ----
-def f_diag_decoder(stim_trig_resp, trial_types):
+def f_diag_decoder(stim_trig_resp, trial_types, seed=None):
+    # the same responses are passed twice in X_all; the control is the label-shuffled
+    # version in Y_all (trial labels shuffled), not a second, different dataset
     X_all = [stim_trig_resp,
              stim_trig_resp]
 
     Y_all = [trial_types,
-             f_shuffle_trials(trial_types)]   # shuffled version
+             dec.shuffle_trials(trial_types, seed=seed)]   # label-shuffled control
     
-    dec_data = f_run_binwise_dec(
+    dec_data = dec.run_binwise_dec(
         X_all,
         Y_all,
         train_test_method='diag',   # options: full, diag, train_at_stim, test_at_stim
@@ -79,7 +82,8 @@ def f_diag_decoder(stim_trig_resp, trial_types):
         num_cv=5,                   # cross validation
         normalize=False,
         add_noise_sigma=1e-5,       # for stability 
-        get_train_coeffs=True)
+        get_train_coeffs=True,
+        seed=seed)
 
     return dec_data
 
@@ -93,7 +97,8 @@ for n_fl in range(len(data_ob)):
 
     dec_data = f_diag_decoder(
         stim_trig_resp_all[n_fl][:,:,trial_types_use],
-        trial_types[trial_types_use])
+        trial_types[trial_types_use],
+        seed=seed)
 
     dec_data_all.append(dec_data)
     
@@ -101,7 +106,7 @@ print('Done')
 
 #%% ---- plotting decoder results ----
 
-fig_diag = f_plot_diag_binwise_dec(
+fig_diag = dec.plot_diag_binwise_dec(
     dec_data_all,
     plot_t=plot_t,
     plot_legend=('Data', 'Shuff'),
@@ -113,17 +118,19 @@ fig_diag = f_plot_diag_binwise_dec(
 
 # ---- save figure ----
 if save_figs:    
-    f_save_fig(fig_diag, path=fig_dir, name_tag='')
+    sd.save_fig(fig_diag, path=fig_dir, name_tag='')
 
 #%% ---- define full decoding space binwise decoder ----
-def f_full_decoder(stim_trig_resp, trial_types):
+def f_full_decoder(stim_trig_resp, trial_types, seed=None):
+    # the same responses are passed twice in X_all; the control is the label-shuffled
+    # version in Y_all (trial labels shuffled), not a second, different dataset
     X_all = [stim_trig_resp,
              stim_trig_resp]
 
     Y_all = [trial_types,
-             f_shuffle_trials(trial_types)]   # shuffled version
+             dec.shuffle_trials(trial_types, seed=seed)]   # label-shuffled control
     
-    dec_data = f_run_binwise_dec(
+    dec_data = dec.run_binwise_dec(
         X_all,
         Y_all,
         train_test_method='full',   # options: full, diag, train_at_stim, test_at_stim
@@ -131,7 +138,8 @@ def f_full_decoder(stim_trig_resp, trial_types):
         num_cv=5,                   # cross validation
         normalize=False,
         add_noise_sigma=1e-5,       # for stability 
-        log=True)
+        log=True,
+        seed=seed)
     return dec_data
 
 #%% ---- run example dataset ---- 
@@ -142,13 +150,14 @@ trial_types_use = trial_types<10
 
 dec_data_full = f_full_decoder(
     stim_trig_resp_all[n_fl][:,:,trial_types_use],
-    trial_types[trial_types_use])
+    trial_types[trial_types_use],
+    seed=seed)
 
 print('Done')
 
 #%%
 
-figs_full = f_plot_full_binwise_dec(dec_data_full,
+figs_full = dec.plot_full_binwise_dec(dec_data_full,
                     plot_t=plot_t,
                     plot_legend=('Data', 'Shuff'),
                     plot_start=-1,
@@ -159,23 +168,23 @@ figs_full = f_plot_full_binwise_dec(dec_data_full,
                     title_tag='Freq single trial decoder')
 
 if save_figs:
-    f_save_fig(figs_full, path=fig_dir, name_tag='')
+    sd.save_fig(figs_full, path=fig_dir, name_tag='')
 
 
 #%%
 if save_figs:
-    f_save_fig(figs_full['diag'], path=fig_dir, name_tag='')
-    f_save_fig(figs_full['fixed_train'], path=fig_dir, name_tag='')
-    f_save_fig(figs_full['fixed_test'], path=fig_dir, name_tag='')
+    sd.save_fig(figs_full['diag'], path=fig_dir, name_tag='')
+    sd.save_fig(figs_full['fixed_train'], path=fig_dir, name_tag='')
+    sd.save_fig(figs_full['fixed_test'], path=fig_dir, name_tag='')
 
 #%% correlation stuff
 
-trial_frames, plot_t = f_get_frames(trial_win = [0.03, .95], frame_rate=1000/np.mean(f_get_values(data_ob, 'volume_period')))
+trial_frames, plot_t = sd.get_frames(trial_win = [0.03, .95], frame_rate=1000/np.mean(sd.get_values(data_ob, 'volume_period')))
 
 stim_trig_resp_corr_all = []
 for n_fl in range(len(data_ob)):  
     # computing stimulus triggered average (neurons, frames, trials)
-    stim_trig_resp = f_get_stim_trig_resp(data_ob[n_fl]['firing_rates'], data_ob[n_fl]['stim_times'], trial_frames = trial_frames)
+    stim_trig_resp = sd.get_stim_trig_resp(data_ob[n_fl]['firing_rates'], data_ob[n_fl]['stim_times'], trial_frames = trial_frames)
     stim_trig_resp_corr_all.append(stim_trig_resp)
     
 #%% corr analysis
@@ -221,7 +230,7 @@ ax1.set_xlabel('Frames')
 cbar = fig1.colorbar(im1)
 cbar.set_label('Firing rate')
 
-#f_save_fig(fig1, path=fig_dir, name_tag='')
+#sd.save_fig(fig1, path=fig_dir, name_tag='')
 
 plt.figure()
 plt.plot(data_ob['firing_rates'][1,:])

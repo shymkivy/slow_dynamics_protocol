@@ -8,17 +8,23 @@ Created on Wed Nov 26 13:32:23 2025
 import os
 import h5py
 import numpy as np
-from scipy.stats import norm
+from scipy.stats import norm, wilcoxon, mannwhitneyu, ttest_ind, ttest_rel, f_oneway
 from scipy.spatial.distance import pdist, squareform, cdist
 from scipy.signal import correlate #, correlation_lags
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, NullFormatter
 from datetime import datetime
+from sd_decoder import plot_diag_binwise_dec, plot_full_binwise_dec
 
 #%%
-def f_get_fnames_from_dir(data_dir, ext_list = [], tags = None):
+def get_fnames_from_dir(data_dir, ext_list = [], tags = None, f_list=None):
+    # list files in data_dir, keeping those with an ext_list extension AND containing every tag; f_list overrides the listing
 
-    f_list = os.listdir(data_dir)
+    if f_list is None:
+        if not os.path.isdir(data_dir):
+            raise FileNotFoundError('Data directory not found: %s' % data_dir)
+        f_list = os.listdir(data_dir)
     f_list2 = []
     for fil1 in f_list:
         if len(ext_list):
@@ -48,19 +54,27 @@ def f_get_fnames_from_dir(data_dir, ext_list = [], tags = None):
 
 #%%
 
-def f_load_caim_data_mat(data_dir, ext_list = [], tags = None, num_files=None, data_tag = 'results_cnmf_sort.mat', proc_tag = 'processed_data.mat', deconvolution='oasis', smooth_std_duration=0.1):
-    
+def load_caim_data_mat(data_dir, ext_list = [], tags = None, num_files=None, data_tag = 'results_cnmf_sort.mat', proc_tag = 'processed_data.mat', deconvolution='oasis', smooth_std_duration=0.1, norm_first=False):
+
+    # load matched caiman .mat sessions from data_dir into a list of dataset dicts (one per session);
+    # main fields: firing_rates (neurons x time), trial_types, stim_times, volume_period, isi.
     # deconvolution methods are either oasis (caiman default) or smoothdftd - smoothed, rectified first derivative
+    # norm_first: False (default) = smooth then peak-normalize (original); True = peak-normalize raw S then smooth (MATLAB order)
     # smooth_std_duration in sec
     
     
-    flist = f_get_fnames_from_dir(data_dir, ext_list=ext_list, tags=tags)
-    
+    dir_files = get_fnames_from_dir(data_dir)
+    flist = get_fnames_from_dir(data_dir, ext_list=ext_list, tags=tags, f_list=dir_files)
+
+    if len(flist) == 0:
+        print('Warning: no files found in %s matching ext %s and tags %s' % (data_dir, ext_list, tags))
+        return []
+
     if num_files is None:
         num_files = len(flist)
     else:
         num_files = np.min([len(flist), num_files])
-        
+
     data_out = []
     
     for n_fl in range(num_files):
@@ -71,8 +85,8 @@ def f_load_caim_data_mat(data_dir, ext_list = [], tags = None, num_files=None, d
         if proc_tag in fname_core:
             fname_core = fname_core.removesuffix(proc_tag)
         
-        flist_data = f_get_fnames_from_dir(data_dir, ext_list = ['.mat'], tags = [fname_core, data_tag])
-        flist_proc = f_get_fnames_from_dir(data_dir, ext_list = ['.mat'], tags = [fname_core, proc_tag])
+        flist_data = get_fnames_from_dir(data_dir, ext_list = ['.mat'], tags = [fname_core, data_tag], f_list=dir_files)
+        flist_proc = get_fnames_from_dir(data_dir, ext_list = ['.mat'], tags = [fname_core, proc_tag], f_list=dir_files)
         
         do_load = False
         if len(flist_proc):
@@ -95,6 +109,9 @@ def f_load_caim_data_mat(data_dir, ext_list = [], tags = None, num_files=None, d
             
             if 'volume_period' in f_proc['data']['frame_data'].keys():
                 data_slice['volume_period'] = f_proc['data']['frame_data']['volume_period'][()].flatten()[0]
+            if data_slice.get('volume_period', 0) <= 0:
+                print('Warning: %s missing or invalid volume_period in _processed_data; using default 33.3 ms (~30 Hz).' % fname_core)
+                data_slice['volume_period'] = 33.3   # ms, default ~30 Hz
             if 'isi' in f_proc['data']['stim_params'].keys():
                 data_slice['isi'] = f_proc['data']['stim_params']['isi'][()].flatten()[0]
             if 'MMN_orientations' in f_proc['data'].keys():
@@ -124,12 +141,20 @@ def f_load_caim_data_mat(data_dir, ext_list = [], tags = None, num_files=None, d
                     C = d_est['C'][()]
                     YrA = d_est['YrA'][()]
                     ca_traces_cut = (C + YrA)[:,comp_acc].T
-                    firing_rates_cut = f_smooth_dfdt(ca_traces_cut, sigma_frames=1000/data_slice['volume_period']*0.1, do_smooth=True)
+                    firing_rates_cut = smooth_dfdt(ca_traces_cut, sigma_frames=1000/data_slice['volume_period']*0.1, do_smooth=True)
                 
-                firing_rates_cut = f_gauss_smooth(firing_rates_cut, sigma_frames=1000/data_slice['volume_period']*smooth_std_duration)
-                
-                peak_rate = np.max(firing_rates_cut, axis=1)[:,None]
-                firing_rates_cutn = firing_rates_cut/peak_rate
+                sigma_fr = 1000/data_slice['volume_period']*smooth_std_duration
+                if norm_first:
+                    # MATLAB order: peak-normalize the raw deconvolved S first, then smooth
+                    peak_rate = np.max(firing_rates_cut, axis=1)[:,None]
+                    peak_rate[peak_rate == 0] = 1
+                    firing_rates_cutn = gauss_smooth(firing_rates_cut/peak_rate, sigma_frames=sigma_fr)
+                else:
+                    # original order: smooth, then peak-normalize the smoothed trace
+                    firing_rates_cut = gauss_smooth(firing_rates_cut, sigma_frames=sigma_fr)
+                    peak_rate = np.max(firing_rates_cut, axis=1)[:,None]
+                    peak_rate[peak_rate == 0] = 1
+                    firing_rates_cutn = firing_rates_cut/peak_rate
                 
                 firing_rates = np.zeros((firing_rates_cutn.shape[0], vid_cuts_trace.shape[0]))
                 firing_rates[:, vid_cuts_trace] = firing_rates_cutn
@@ -150,10 +175,21 @@ def f_load_caim_data_mat(data_dir, ext_list = [], tags = None, num_files=None, d
             data_slice['dset_idx'] = dset_idx
         
             data_out.append(data_slice)
-        
+
+    if len(data_out):
+        mouse_ids = list(np.unique(get_mouse_id(data_out)))
+        print('Loaded %d datasets from %d mice: %s' % (len(data_out), len(mouse_ids), mouse_ids))
+
     return data_out
 
-def f_h5_load_group(group, keys=None):
+def load_caim_data_mat2(*args, **kwargs):
+    # same as load_caim_data_mat but with the MATLAB preprocessing order:
+    # peak-normalize the raw deconvolved S first, then smooth (norm_first=True)
+    kwargs['norm_first'] = True
+    return load_caim_data_mat(*args, **kwargs)
+
+def h5_load_group(group, keys=None):
+    # load the given keys (default: all) of an open h5py group into a plain dict
     if keys is None:
         keys = group.keys()
         
@@ -163,8 +199,9 @@ def f_h5_load_group(group, keys=None):
     
     return data
 
-def f_get_values(data_out, key):
-    
+def get_values(data_out, key):
+    # collect data_slice[key] across the datasets in the list (skips slices missing key)
+
     values = []
     
     for data_slice in data_out:
@@ -173,18 +210,34 @@ def f_get_values(data_out, key):
             
     return values
 
-def f_get_mouse_id(data_echo):
-    
-    fnames = f_get_values(data_echo, 'fname_core')
+def get_mouse_id(data_echo):
+    # mouse id per dataset = text before the first underscore of fname_core (e.g. 'M4372')
+
+    fnames = get_values(data_echo, 'fname_core')
     
     mouse_id = []
     for fname in fnames:
-        mouse_id.append(fname[:fname.find('_')])
-        
+        mouse_id.append(fname.split('_')[0])
+
     return mouse_id
 
-def f_smooth_dfdt(data, do_smooth=True, sigma_frames=1, rectify=True, normalize=True):
-    
+def get_example_mouse(data_echo, example_mouse='M4372'):
+    # return (per-dataset mouse-id array, example_mouse); error if example_mouse is not among the loaded datasets
+
+    mouse_list = np.array(get_mouse_id(data_echo))
+    mouse_uq = np.unique(mouse_list)
+
+    if example_mouse not in mouse_uq:
+        raise ValueError('Example mouse %s not found among loaded datasets. The trial-to-trial '
+                         'similarity demo requires all six variable-ISI (echo) datasets: '
+                         'M226, M4264, M4265, M4266, M4371, M4372. Loaded mice: %s'
+                         % (example_mouse, list(mouse_uq)))
+
+    return mouse_list, example_mouse
+
+def smooth_dfdt(data, do_smooth=True, sigma_frames=1, rectify=True, normalize=True):
+    # smoothdfdt firing-rate estimate: per-neuron smoothed first derivative, optionally rectified and peak-normalized
+
     num_cells, num_frames = data.shape
     
     firing_rates = np.zeros((num_cells, num_frames));
@@ -214,8 +267,9 @@ def f_smooth_dfdt(data, do_smooth=True, sigma_frames=1, rectify=True, normalize=
     
     return firing_rates
 
-def f_gauss_smooth(firing_rates, sigma_frames=1):
-    
+def gauss_smooth(firing_rates, sigma_frames=1):
+    # gaussian smoothing of each neuron's trace (sigma in frames; 0 = no smoothing)
+
     if sigma_frames:
         num_cells, num_frames = firing_rates.shape
         
@@ -231,7 +285,7 @@ def f_gauss_smooth(firing_rates, sigma_frames=1):
     
     return firing_rates_sm
 
-def f_normalize(rates):
+def normalize(rates):
     # assumes neurons x time
     
     rates_n = rates - np.min(rates, axis=1)[:, None]
@@ -245,7 +299,7 @@ def f_normalize(rates):
     return rates_n
     
 
-def f_get_frames(trial_win = [-0.05, .95], frame_rate = 30):
+def get_frames(trial_win = [-0.05, .95], frame_rate = 30):
     # anchor at 0
     frame_start = np.ceil(trial_win[0] * frame_rate)
     frame_end = np.ceil(trial_win[1] * frame_rate)
@@ -253,7 +307,7 @@ def f_get_frames(trial_win = [-0.05, .95], frame_rate = 30):
     plot_t = np.round(np.arange(frame_start/frame_rate, frame_end/frame_rate, 1/frame_rate), decimals=4)
     return trial_frames, plot_t
 
-def f_get_stim_trig_resp(firing_rates, stim_times, trial_frames = [-29, 85]):
+def get_stim_trig_resp(firing_rates, stim_times, trial_frames = [-29, 85]):
     # input: cells x time
     
     num_cells, T = firing_rates.shape
@@ -266,15 +320,21 @@ def f_get_stim_trig_resp(firing_rates, stim_times, trial_frames = [-29, 85]):
     for n_tr in range(num_trials):
         cur_frame = round(stim_times[n_tr]-1) # correct for matlab to python 
         
-        start1 = (cur_frame+trial_frames[0])
-        end1 = np.min([cur_frame+trial_frames[1], T])
-        
-        stim_trig_resp[:,:end1-start1,n_tr] = firing_rates[:,start1:end1]
+        raw_start = cur_frame + trial_frames[0]
+        raw_end = cur_frame + trial_frames[1]
+
+        src_start = np.max([raw_start, 0])
+        src_end = np.min([raw_end, T])
+
+        if src_end > src_start:
+            dst_start = src_start - raw_start
+            stim_trig_resp[:, dst_start:dst_start + (src_end - src_start), n_tr] = firing_rates[:, src_start:src_end]
     
     return stim_trig_resp
     
-def f_save_fig(fig, path='/', name_tag=''):
-    
+def save_fig(fig, path='/', name_tag=''):
+    # save the figure as svg + png (1200 dpi), named from the first-axis title + date + name_tag
+
     plt.rcParams['svg.fonttype'] = 'none'
     name1 = fig.axes[0].title.get_text()
     now1 = datetime.now()
@@ -285,7 +345,8 @@ def f_save_fig(fig, path='/', name_tag=''):
     fig.savefig('%s/%s_%s%s.png' % (path, name1, date_tag, name_tag), dpi=1200)
 
 
-def f_get_trial_peak(trial_ave, peak_size=3):
+def get_trial_peak(trial_ave, peak_size=3):
+    # per-neuron peak response: mean over a peak_size-frame window centred on each neuron's argmax; returns (peak_vals, peak_locs)
     num_cells, num_bins = trial_ave.shape
     
     pad_left = np.floor((peak_size-1)/2).astype(int)
@@ -315,8 +376,10 @@ def f_get_trial_peak(trial_ave, peak_size=3):
     return peak_vals, peak_locs
 
 
-def f_compute_tuning(stim_trig_resp, trial_types, trials_analyze, plot_t, num_samp=2000, z_thresh = 3, sig_resp_win = [0, 1.5]):
-    
+def compute_tuning(stim_trig_resp, trial_types, trials_analyze, plot_t, num_samp=2000, z_thresh = 3, sig_resp_win = [0, 1.5], seed=None):
+    # find stimulus-responsive cells per trial type by comparing each cell's peak response to a shuffled null
+    # (z_thresh over num_samp shuffles, within sig_resp_win); returns a (cells x trial types) responsive-cell mask
+
     tt_use_idx = np.sum(trial_types == trials_analyze[:,None],axis=0).astype(bool)
     trial_types_use = trial_types[tt_use_idx]
     stim_trig_resp_use = stim_trig_resp[:,:,tt_use_idx]
@@ -329,9 +392,9 @@ def f_compute_tuning(stim_trig_resp, trial_types, trials_analyze, plot_t, num_sa
     peak_locs = np.full((num_cells, num_tt), np.nan)
     for n_tt in range(num_tt):
         tt1_idx = trial_types_use == trials_analyze[n_tt]
-        if len(tt1_idx):
+        if np.any(tt1_idx):
             trial_ave1 = np.mean(stim_trig_resp_use[:,:,tt1_idx], axis=2)
-            peak_vals[:,n_tt], peak_locs[:,n_tt] = f_get_trial_peak(trial_ave1, peak_size=3)
+            peak_vals[:,n_tt], peak_locs[:,n_tt] = get_trial_peak(trial_ave1, peak_size=3)
     
     # make shuffled dist
     trials_per_stim = np.zeros(num_tt, dtype=int)
@@ -341,11 +404,11 @@ def f_compute_tuning(stim_trig_resp, trial_types, trials_analyze, plot_t, num_sa
     
     samp_peak_vals = np.full((num_cells, num_samp), np.nan)
     samp_peak_locs = np.full((num_cells, num_samp), np.nan)
-    rng = np.random.default_rng()
+    rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
     for n_cell in range(num_cells):
         random_integers = rng.integers(low=0, high=num_trials, size=(trials_per_stim_ave, num_samp))
         samp_trial_ave = np.mean(stim_trig_resp_use[n_cell,:,random_integers], axis=0)
-        samp_peak_vals[n_cell,:], samp_peak_locs[n_cell,:] = f_get_trial_peak(samp_trial_ave, peak_size=3)
+        samp_peak_vals[n_cell,:], samp_peak_locs[n_cell,:] = get_trial_peak(samp_trial_ave, peak_size=3)
 
     idx1 = ~np.isnan(peak_locs[0,:])
     peak_locs_t = np.full((num_cells, num_tt), np.nan)
@@ -362,15 +425,18 @@ def f_compute_tuning(stim_trig_resp, trial_types, trials_analyze, plot_t, num_sa
     return resp_cells_peak
 
 
-def f_compute_correlation(stim_trig_resp, trial_types, trials_analyze, resp_cells=None, min_resp_cells=5, subtract_mean=False, add_noise_sigma=1e-5, metric='correlation'):
-    
+def compute_correlation(stim_trig_resp, trial_types, trials_analyze, resp_cells=None, min_resp_cells=5, subtract_mean=False, add_noise_sigma=1e-5, metric='correlation', cell_select='resp_marg', drop_zero_cells=True, seed=None):
+    # cell_select: 'resp_marg' (union of responsive cells; = MATLAB 'Resp marg'),
+    #              'resp_split' (per-frequency responsive cells; = MATLAB 'Resp split'), or 'all'
+    # drop_zero_cells: True drops cells with non-positive mean across trials (Python-only; MATLAB keeps all)
+    rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
     corr_vals = np.full((len(trials_analyze)), np.nan)
     
     if subtract_mean:
         stim_trig_resp = stim_trig_resp - np.mean(stim_trig_resp)
 
     if add_noise_sigma:   # add some uncorrelated noise to add stability
-        stim_trig_resp = stim_trig_resp + np.random.normal(0, add_noise_sigma, size=stim_trig_resp.shape)
+        stim_trig_resp = stim_trig_resp + rng.normal(0, add_noise_sigma, size=stim_trig_resp.shape)
     
     if resp_cells is not None:
         resp_marg = np.sum(resp_cells, axis=1).astype(bool)
@@ -387,20 +453,27 @@ def f_compute_correlation(stim_trig_resp, trial_types, trials_analyze, resp_cell
             tr_idx = trial_types == tn1
             
             stim_trig_resp2 = stim_trig_resp[:,:,tr_idx]
-            if resp_cells is not None:
-                stim_trig_resp3 = stim_trig_resp2[resp_marg,:,:]
-            else:
-                stim_trig_resp3 = stim_trig_resp2
+            # cell selection mode
+            if resp_cells is None or cell_select == 'all':
+                cell_mask = np.ones(stim_trig_resp2.shape[0], dtype=bool)
+            elif cell_select == 'resp_split':
+                cell_mask = resp_cells[:,n_tn].astype(bool)     # per-frequency responsive cells
+            else:  # 'resp_marg'
+                cell_mask = resp_marg                           # union of responsive cells
+            stim_trig_resp3 = stim_trig_resp2[cell_mask,:,:]
             stim_trig_resp4 = np.mean(stim_trig_resp3, axis=1)
-            
-            act_idx = np.mean(stim_trig_resp4, axis =1) > 0
-            
-            stim_trig_resp5 = stim_trig_resp4[act_idx,:]
+
+            if drop_zero_cells:
+                act_idx = np.mean(stim_trig_resp4, axis=1) > 0
+                stim_trig_resp5 = stim_trig_resp4[act_idx,:]
+            else:
+                stim_trig_resp5 = stim_trig_resp4
             
             distances = squareform(pdist(stim_trig_resp5.T, metric=metric))     # cosine, correlation
             SI = 1 - distances
             SI2 = np.tril(SI, k=-1)
-            corr_vals[n_tn] = np.mean(SI2[SI2.astype(bool)])
+            SI2_vals = SI2[SI2.astype(bool)]
+            corr_vals[n_tn] = np.mean(SI2_vals) if len(SI2_vals) else np.nan
             
             # if 0:
             #     if tn1==4:
@@ -410,13 +483,14 @@ def f_compute_correlation(stim_trig_resp, trial_types, trials_analyze, resp_cell
                     
     return corr_vals
         
-def f_compute_correlation_mat(stim_trig_resp, subtract_mean=False, add_noise_sigma=1e-5, metric='correlation'):
-    
+def compute_correlation_mat(stim_trig_resp, subtract_mean=False, add_noise_sigma=1e-5, metric='correlation', seed=None):
+    # trial-by-trial similarity matrix (1 - pairwise distance) of each trial's mean stimulus response
+    rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
     if subtract_mean:
         stim_trig_resp = stim_trig_resp - np.mean(stim_trig_resp)
 
     if add_noise_sigma:   # add some uncorrelated noise to add stability
-        stim_trig_resp = stim_trig_resp + np.random.normal(0, add_noise_sigma, size=stim_trig_resp.shape)
+        stim_trig_resp = stim_trig_resp + rng.normal(0, add_noise_sigma, size=stim_trig_resp.shape)
     
     stim_trig_resp2 = np.mean(stim_trig_resp, axis=1)
     
@@ -426,22 +500,26 @@ def f_compute_correlation_mat(stim_trig_resp, subtract_mean=False, add_noise_sig
     return SI
 
 #%%
-def f_get_network_distance(firing_rates):
-
+def get_network_distance(firing_rates):
+    # euclidean distance of the population vector from its time-averaged baseline at each frame: d(t) = ||r(t) - mean_t r||
     base_pop_vec = np.mean(firing_rates, axis=1)
     tr_dist = cdist(np.reshape(base_pop_vec, (1,len(base_pop_vec))), firing_rates.T, 'euclidean')[0]
 
     return tr_dist
 
-def f_get_trace_tau(trace, sm_bin = 0):
-    
+def get_trace_tau(trace, sm_bin = 0):
+    # intrinsic timescale of a trace = first autocorrelation lag (in frames) where it drops below 0.5; returns (tau, autocorr)
+
     #sm_bin = 10#round(1/params['dt'])*50;
     #trial_len = out_temp_all.shape[1]
     
     
     tracen = trace - np.mean(trace)
-    tracen = tracen/np.std(tracen)
-    
+    trace_std = np.std(tracen)
+    if trace_std == 0:
+        return np.nan, np.full(len(trace), np.nan)
+    tracen = tracen/trace_std
+
     corr1 = correlate(tracen, tracen)/len(tracen)
     
     #lags = correlation_lags(len(tracen), len(tracen))
@@ -459,7 +537,8 @@ def f_get_trace_tau(trace, sm_bin = 0):
     
     # plt.figure(); plt.plot(corr1)
     
-    tau_corr = np.where(corr1_smn2 < 0.5)[0][0]
+    below = np.where(corr1_smn2 < 0.5)[0]
+    tau_corr = below[0] if len(below) else np.nan
     
     # x = np.arange(corr_len)+1
     # y = corr1[num_trials2*num_run:num_trials2*num_run+corr_len]
@@ -482,16 +561,31 @@ def f_get_trace_tau(trace, sm_bin = 0):
 
 #%%
 
-def f_load_rnn_test(data_dir, fname_data, fname_params, max_net_load = 999, limit_network_types=[], flatten_runs = False, max_trial_types = 10, max_trials = 500, cut_zero_trials = False, num_initial_trials_skip = 0):
+def load_rnn_test(data_dir, fname_data, fname_params, max_net_load = 999, limit_network_types=[], flatten_runs = False, max_trial_types = 10, max_trials = 500, cut_zero_trials = False, num_initial_trials_skip = 0, seed=None):
+    rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
     # input is the spectrogram inputs
     # target is the index when oddball trial happens
-    # loaded rates shape is (time, run, neurons) - inside converted to 
+    # loaded rates shape is (time, run, neurons) - inside converted to
     # output rates are converted to (runs, neurons, time)
     # flatten runs makes output rates 2D (neurons, time)
     # max trial types and max trials only apply during flattened runs
+    # returns a list of dicts (one per network), matching the calcium-data format;
+    # main field 'firing_rates' is (neurons, time) if flatten_runs else (runs, neurons, time)
     
     
-    test_data_load = np.load(data_dir + fname_data, allow_pickle=True).item()
+    data_path = os.path.join(data_dir, fname_data)
+    params_path = os.path.join(data_dir, fname_params)
+
+    for p in (data_path, params_path):
+        if not os.path.isfile(p):
+            raise FileNotFoundError('RNN test file not found: %s' % p)
+
+    if '_ob_data' in fname_data:
+        print('Note: the oddball (_ob_data) RNN file is large (tens of GB) and is loaded fully into memory '
+              'before subsetting, so max_net_load does not reduce the peak memory. Ensure sufficient RAM, '
+              'or use the smaller control file (_cont_data).')
+
+    test_data_load = np.load(data_path, allow_pickle=True).item()
     data_key = list(test_data_load.keys())[0]
     test_data_load_all = test_data_load[data_key]
     
@@ -504,7 +598,7 @@ def f_load_rnn_test(data_dir, fname_data, fname_params, max_net_load = 999, limi
     # test_data_load_all[0][0]['rates'].shape
     # np.save(data_dir + 'RNN_test_data_2024_5_24_9h_42m_ob_data2.npy', test_data_load)
     
-    deets_load = np.load(data_dir + fname_params, allow_pickle=True).item()
+    deets_load = np.load(params_path, allow_pickle=True).item()
     params_all = deets_load['params_all']
     params_test = deets_load['params_test']
     # deets_load['ob_data'].keys()
@@ -516,10 +610,9 @@ def f_load_rnn_test(data_dir, fname_data, fname_params, max_net_load = 999, limi
      
     data_all = []
     
-    use_net_type_lim = False
-    for n_net in range(len(test_data_load_all)):
-        if deets_load['rnn_leg'][n_net] in deets_load['rnn_leg']:
-            use_net_type_lim = True
+    if len(limit_network_types) == 0:
+        limit_network_types = list(np.unique(deets_load['rnn_leg']))
+    use_net_type_lim = True
     
     
     if 'ob' in data_key:
@@ -551,14 +644,14 @@ def f_load_rnn_test(data_dir, fname_data, fname_params, max_net_load = 999, limi
                         # deets_load['ob_data'].keys() 
                         # deets_load['ob_data']['trials_oddball_freq']
                         if 1:
-                            stim_on_tace = 1 - deets_load['ob_data']['target_oddball_ctx3'][:,n_run,0]
+                            stim_on_trace = 1 - deets_load['ob_data']['target_oddball_ctx3'][:,n_run,0]
                         else:
                             stim_trace = np.max(net1['input'][:,n_run], axis=1)
                             stim_trace_n = stim_trace - np.percentile(stim_trace, 20)
                             stim_trace_n = stim_trace_n / np.max(stim_trace_n)
-                            stim_on_tace = (stim_trace_n > 0.5).astype(int)
+                            stim_on_trace = (stim_trace_n > 0.5).astype(int)
         
-                        stim_onset_trace = np.diff(stim_on_tace, prepend=[0]) > 0
+                        stim_onset_trace = np.diff(stim_on_trace, prepend=[0]) > 0
                         stim_times = np.where(stim_onset_trace)[0]
                         stim_times_runs.append(stim_times)
                         
@@ -586,6 +679,8 @@ def f_load_rnn_test(data_dir, fname_data, fname_params, max_net_load = 999, limi
                     if cut_zero_trials or num_initial_trials_skip > 0:
                         
                         trial_len = round((params_test['stim_duration'] + params_test['isi_duration']) / params_test['dt'])
+                        if T % trial_len != 0:
+                            raise ValueError('RNN trace length T=%d is not divisible by trial_len=%d; cannot reshape into whole trials (check stim_duration/isi_duration/dt).' % (T, trial_len))
                         rates3d = net1['rates']
                         rates4d = np.reshape(rates3d, (round(T/trial_len), trial_len, num_runs, num_neurons), order='C')
                         
@@ -593,7 +688,10 @@ def f_load_rnn_test(data_dir, fname_data, fname_params, max_net_load = 999, limi
                             num_skip = params_test['num_prepend_zeros'] + num_initial_trials_skip
                         else:
                             num_skip = num_initial_trials_skip
-                        
+
+                        if num_skip >= rates4d.shape[0]:
+                            raise ValueError('num_initial_trials_skip (+ prepended zeros) = %d exceeds the %d available trials; reduce num_initial_trials_skip.' % (num_skip, rates4d.shape[0]))
+
                         rates4d_cut = rates4d[num_skip:,:,:]
                         rates2 = np.reshape(rates4d_cut, ((round(T/trial_len) - num_skip) * trial_len, num_runs, num_neurons), order='C')
                         
@@ -629,7 +727,7 @@ def f_load_rnn_test(data_dir, fname_data, fname_params, max_net_load = 999, limi
                         
                         # limit trials to max number
                         if max_trials < num_stim_all:
-                            trial_idx = np.random.choice(sel_trials, size=np.min([max_trials, num_stim_all2]), replace=False)
+                            trial_idx = rng.choice(sel_trials, size=np.min([max_trials, num_stim_all2]), replace=False)
                             trial_idx.sort()
                             
                         else:
@@ -665,105 +763,21 @@ def f_load_rnn_test(data_dir, fname_data, fname_params, max_net_load = 999, limi
                     data_all.append(data_slice)
             
                     del net1
-            
+
+    if len(data_all):
+        trainings = [d['training'] for d in data_all]
+        uq, cnt = np.unique(trainings, return_counts=True)
+        print('Loaded %d RNN networks: %s' % (len(data_all), dict(zip(list(uq), [int(c) for c in cnt]))))
+    else:
+        print('Warning: no RNN networks loaded (file %s, limit_network_types=%s)' % (fname_data, limit_network_types))
+
     return data_all
     
 #%%
 
-def f_plot_diag_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, axis=None, title_tag='', colors = ['blue', 'black']):
-    
-    
-    if type(dec_data_list) is not list:
-        if type(dec_data_list) is not np.ndarray:
-            dec_data_list = [dec_data_list]
-    
-    plt_start2 = np.argmin(np.abs(plot_start - plot_t))
-    plt_end2 = np.argmin(np.abs(plot_end - plot_t))
-    
-    plot_t2 = plot_t[plt_start2:plt_end2]
-    
-    # label='Alpha 0.6
+def get_network_intrinsic_timescales(firing_rates, frame_rate):
+    # per recording (or RNN run): network tau from the baseline-distance autocorrelation and per-neuron tau; both in seconds
 
-    num_dsets = len(dec_data_list)
-    
-    num_t, _, num_dec = dec_data_list[0]['performance'].shape
-    traces_all = np.zeros((num_dsets, num_dec, len(plot_t2)))
-    
-    for n_d in range(num_dsets):
-        perform_train_test = dec_data_list[n_d]['performance']
-        num_t, _, num_dec = perform_train_test.shape
-        for n_dec in range(num_dec):
-            traces_all[n_d, n_dec, :] = perform_train_test[plt_start2:plt_end2,:,n_dec].flatten()
-            
-    if axis is None:
-        fig1, axis = plt.subplots()
-    
-    leg_lines = []
-    for n_dec in range(num_dec):
-        mean_trace = np.mean(traces_all[:, n_dec, :], axis=0)
-        sem_trace = np.std(traces_all[:, n_dec, :], axis=0)/np.max([np.sqrt(num_dsets-1), 1])
-        l1, = axis.plot(plot_t2, mean_trace, color=colors[n_dec])
-        leg_lines.append(l1)
-        axis.fill_between(plot_t2, mean_trace-sem_trace, mean_trace+sem_trace, color=colors[n_dec], alpha=0.2)
-    
-    if plot_legend is not None:
-        axis.legend(handles=leg_lines, labels=plot_legend)
-    axis.set_xlabel('Time (sec)')
-    axis.set_ylabel('Performance')
-    if len(title_tag):
-        axis.set_title(title_tag)
-           
-    return axis
-
-def f_plot_full_binwise_dec(dec_data, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, axis=None, title_tag='', clim=[0, 1], clim_width_ratio = 10, figsize=(17, 3.5)):
-    
-    plt_start2 = np.argmin(np.abs(plot_start - plot_t))
-    plt_end2 = np.argmin(np.abs(plot_end - plot_t))
-    
-    plot_t2 = plot_t[plt_start2:plt_end2]
-    
-    # label='Alpha 0.6
-
-    perform_train_test = dec_data['performance']
-    num_t, _, num_dec = perform_train_test.shape
-    
-    if axis is None:
-        fig, ax1 = plt.subplots(1, num_dec+1, gridspec_kw={'width_ratios': list(np.ones(num_dec)*clim_width_ratio) + [1]}, figsize=figsize)
-    else:
-        ax1 = axis
-    
-    for n_dec in range(num_dec):
-        perform_train_test[plt_start2:plt_end2,plt_start2:plt_end2,n_dec]
-    
-    for n_dec in range(num_dec):
-        
-        im1 = ax1[n_dec].imshow(perform_train_test[plt_start2:plt_end2,plt_start2:plt_end2,n_dec], extent=(np.min(plot_t2), np.max(plot_t2), np.max(plot_t2), np.min(plot_t2)), clim=clim)
-        #ax1.set_clim([0, 1])
-        ax1[n_dec].set_xlabel('Test time (sec)')
-        ax1[n_dec].set_ylabel('Train time (sec)')
-        if len(title_tag):
-            ax1[n_dec].set_title('%s %s' % (title_tag, if_get_leg(dec_data, plot_legend)[n_dec]))
-        else:
-            axis[n_dec].set_title(plot_legend[n_dec])
-    if len(ax1) > num_dec:
-        plt.colorbar(im1, cax=axis.flatten()[-1])
-        ax1.flatten()[-1].set_ylabel('Performance')
-        
-        #cbar = fig.colorbar(im1)
-        #cbar.set_label('Performance')   
-    if axis is None:
-        return fig
-    
-def if_get_leg(dec, f_leg):
-    if 'legend' in dec:
-        leg = dec['legend']
-    elif f_leg is not None:
-        leg = f_leg
-    
-    return leg
-
-def f_get_network_intrinsic_timescales(firing_rates, frame_rate):
-    
     if len(firing_rates.shape) == 2:
         rates3d = firing_rates[None,:,:]
     else:
@@ -776,16 +790,16 @@ def f_get_network_intrinsic_timescales(firing_rates, frame_rate):
     
     for n_run in range(num_runs):
         
-        tr_dist = f_get_network_distance(rates3d[n_run,:,:])
+        tr_dist = get_network_distance(rates3d[n_run,:,:])
         
-        tau_net1, _ = f_get_trace_tau(tr_dist, sm_bin = 0)
+        tau_net1, _ = get_trace_tau(tr_dist, sm_bin = 0)
         tau_net[n_run] = tau_net1/frame_rate
         
         for n_nr in range(num_neurons):
       
             neur = rates3d[n_run,n_nr,:]
             if np.sum(neur) > 0.1:
-                tau_neur1, _ = f_get_trace_tau(neur, sm_bin = 0)
+                tau_neur1, _ = get_trace_tau(neur, sm_bin = 0)
                 tau_cell[n_run, n_nr] = tau_neur1/frame_rate
                 
     return tau_net, tau_cell
@@ -793,7 +807,7 @@ def f_get_network_intrinsic_timescales(firing_rates, frame_rate):
 #%%
 
 
-def f_plot_fig_raster(firing_rates_ob, firing_rates_rnn, frame_rate=None, frame_rate_rnn=None):
+def plot_fig_raster(firing_rates_ob, firing_rates_rnn, frame_rate=None, frame_rate_rnn=None):
     # ---- plot example raster ----
     fig, ax = plt.subplots(1,2, figsize=(12,5), layout='constrained')
     fig.set_constrained_layout_pads(w_pad=0.2, h_pad=0.3, hspace=0, wspace=0)
@@ -829,7 +843,7 @@ def f_plot_fig_raster(firing_rates_ob, firing_rates_rnn, frame_rate=None, frame_
         x_end = num_t_rnn
         x_lab = 'Frames'
 
-    ax[1].imshow(f_normalize(firing_rates_rnn),
+    ax[1].imshow(normalize(firing_rates_rnn),
                aspect='auto',
                cmap='gist_yarg',
                vmin=0,
@@ -842,54 +856,60 @@ def f_plot_fig_raster(firing_rates_ob, firing_rates_rnn, frame_rate=None, frame_
     
     return fig
 
-def f_plot_fig_diag_decoder(dec_data_all, dec_data_all_rnn, training_type, plot_t=None, plot_t_rnn=None):
+def plot_fig_diag_decoder(dec_data_all, dec_data_all_rnn, training_type, plot_t=None, plot_t_rnn=None, add_sig=True):
     # ---- Plotting diagonal decoder results ----
+    # add_sig=True overlays binwise data-vs-shuffle significance (see plot_diag_binwise_dec)
     fig_diag, ax = plt.subplots(1,2, figsize=(12,5), layout='constrained')
     fig_diag.set_constrained_layout_pads(w_pad=0.2, h_pad=0.1, hspace=0, wspace=0)
     fig_diag.text(0.015, .87, 'A', fontsize=18)
     fig_diag.text(0.515, .87, 'B', fontsize=18)
     fig_diag.suptitle('Binwise decoder')
 
-    f_plot_diag_binwise_dec(
+    plot_diag_binwise_dec(
         dec_data_all,
         plot_t=plot_t,
         plot_legend=('Data', 'Shuff'),
         plot_start=-1,                    # plot window start
         plot_end=3,                       # plot window end
         axis = ax[0],
-        title_tag='CaIm data')
+        title_tag='CaIm data',
+        add_sig=add_sig)
 
-    f_plot_diag_binwise_dec(
+    plot_diag_binwise_dec(
         np.array(dec_data_all_rnn)[training_type == 'ob trained'],
         plot_t=plot_t_rnn,
         plot_start=-1,
         plot_end=8,
         axis=ax[1],
         title_tag='RNN test data',
-        colors = ['limegreen', 'darkgreen'])
+        colors = ['limegreen', 'darkgreen'],
+        add_sig=add_sig)
 
-    f_plot_diag_binwise_dec(
+    plot_diag_binwise_dec(
         np.array(dec_data_all_rnn)[training_type == 'freq trained'],
         plot_t=plot_t_rnn,
         plot_start=-1,
         plot_end=8,
         axis=ax[1],
-        colors = ['orange', 'saddlebrown'])
+        colors = ['orange', 'saddlebrown'],
+        add_sig=add_sig)
 
-    ax[1].legend(ax[1].get_lines(), ['Oddball trained', 'Oddball trained shuff', 'Freq trained', 'Freq trained shuff'])
+    # legend from the mean-trace lines only (exclude the '.-' binwise-significance lines)
+    main_lines = [l for l in ax[1].get_lines() if l.get_marker() in ('', 'None', None)]
+    ax[1].legend(main_lines, ['Oddball trained', 'Oddball trained shuff', 'Freq trained', 'Freq trained shuff'])
     
     return fig_diag
 
-def f_plot_fig_full_decoder_caim(dec_data_full, plot_t, clim=[0, 0.5]):
+def plot_fig_full_decoder_caim(dec_data_full, plot_t, clim=[0, 0.5]):
     
-    # ---- Rlotting full decoder results CaIm data ----
+    # ---- Plotting full decoder results CaIm data ----
     fig_full, ax = plt.subplots(1, 3, gridspec_kw={'width_ratios': [20, 20, 1]}, figsize=(12, 5.7), layout='constrained')
     fig_full.set_constrained_layout_pads(w_pad=0.01, h_pad=0.1, hspace=0, wspace=0)
     fig_full.text(0.01, .88, 'A', fontsize=16)
     fig_full.text(0.47, .88, 'B', fontsize=16)
     fig_full.suptitle('CaIm data full space decoder', fontsize=14)
 
-    f_plot_full_binwise_dec(
+    plot_full_binwise_dec(
         dec_data_full,
         plot_t=plot_t,
         plot_legend=('Data', 'Shuff'),
@@ -901,9 +921,9 @@ def f_plot_fig_full_decoder_caim(dec_data_full, plot_t, clim=[0, 0.5]):
     
     return fig_full
 
-def f_plot_fig_full_decoder_RNN(dec_data_full_ob, dec_data_full_freq, plot_t):
+def plot_fig_full_decoder_RNN(dec_data_full_ob, dec_data_full_freq, plot_t):
     
-    # ---- Rlotting full decoder results RNN data ----
+    # ---- Plotting full decoder results RNN data ----
     fig_full, ax = plt.subplots(2, 3, gridspec_kw={'width_ratios': [20, 20, 1]}, figsize=(12,11), layout='constrained')
     fig_full.set_constrained_layout_pads(w_pad=0.05, h_pad=0.1, hspace=0, wspace=0)
     fig_full.text(0.005, .94, 'A', fontsize=16)
@@ -912,7 +932,7 @@ def f_plot_fig_full_decoder_RNN(dec_data_full_ob, dec_data_full_freq, plot_t):
     fig_full.text(0.465, .46, 'D', fontsize=16)
     fig_full.suptitle('RNN neurons full space decoder', fontsize=14)
 
-    f_plot_full_binwise_dec(
+    plot_full_binwise_dec(
         dec_data_full_ob,
         plot_t=plot_t,
         plot_legend=('data', 'shuff'),
@@ -922,7 +942,7 @@ def f_plot_fig_full_decoder_RNN(dec_data_full_ob, dec_data_full_freq, plot_t):
         axis=ax[0,:],
         title_tag='RNN Oddball trained')
 
-    f_plot_full_binwise_dec(
+    plot_full_binwise_dec(
         dec_data_full_freq,
         plot_t=plot_t,
         plot_legend=('data', 'shuff'),
@@ -934,13 +954,13 @@ def f_plot_fig_full_decoder_RNN(dec_data_full_ob, dec_data_full_freq, plot_t):
     
     return fig_full
 
-def f_plot_fig_full_decoder_comb(dec_data_full, dec_data_full_ob, dec_data_full_freq, plot_t, plot_t_rnn):
+def plot_fig_full_decoder_comb(dec_data_full, dec_data_full_ob, dec_data_full_freq, plot_t, plot_t_rnn):
     # ---- plotting full decoder results ----
     fig_full, ax = plt.subplots(3, 3, gridspec_kw={'width_ratios': [10, 10, 1]}, figsize=(15, 12))
     fig_full.text(0.09, .88, 'A', fontsize=16)
     fig_full.text(0.51, .88, 'B', fontsize=16)
 
-    f_plot_full_binwise_dec(
+    plot_full_binwise_dec(
         dec_data_full,
         plot_t=plot_t,
         plot_legend=('Data', 'Shuff'),
@@ -951,7 +971,7 @@ def f_plot_fig_full_decoder_comb(dec_data_full, dec_data_full_ob, dec_data_full_
         title_tag='CaIm data')
 
 
-    f_plot_full_binwise_dec(
+    plot_full_binwise_dec(
         dec_data_full_ob,
         plot_t=plot_t_rnn,
         plot_legend=('Oddball trained', 'Shuff'),
@@ -962,7 +982,7 @@ def f_plot_fig_full_decoder_comb(dec_data_full, dec_data_full_ob, dec_data_full_
         title_tag='RNN Ob trained')
 
 
-    f_plot_full_binwise_dec(
+    plot_full_binwise_dec(
         dec_data_full_freq,
         plot_t=plot_t_rnn,
         plot_legend=('Freq trained', 'Shuff'),
@@ -976,8 +996,9 @@ def f_plot_fig_full_decoder_comb(dec_data_full, dec_data_full_ob, dec_data_full_
 
 #%%
 
-def f_plot_fig_isi_corr_trials(corr_vals, isi_list, colormap='jet', metric_tag = None):
-    
+def plot_fig_isi_corr_trials(corr_vals, isi_list, colormap='jet', metric_tag = None):
+    # trial-to-trial correlation vs ISI: panel A = mean over frequencies, panel B = per-frequency lines; returns (fig, ax, groups)
+
     fig, ax = plt.subplots(1,2, figsize=(12,5))
     fig.text(0.07, .88, 'A', fontsize=16)
     fig.text(0.51, .88, 'B', fontsize=16)
@@ -1003,22 +1024,91 @@ def f_plot_fig_isi_corr_trials(corr_vals, isi_list, colormap='jet', metric_tag =
     else:
         ax[1].set_ylabel('Correlation') 
     ax[1].set_xlabel('ISI duration (sec)')
-    ax[1].legend([str(n+1) for n in range(10)], loc='upper right')
+    freqs = np.logspace(np.log10(2), np.log10(76.9), num_trials)   # kHz, log-spaced 2 -> 76.9 (x1.5/step)
+    ax[1].legend(['%g' % round(f, 1) for f in freqs], loc='upper right', title='Freq (kHz)')
     ax[1].set_title('Individual freqs.')
     
     mean1 = np.nanmean(corr_tn_all, axis=0)
     sem1 = np.nanstd(corr_tn_all, axis=0)/np.sqrt(np.sum(~np.isnan(corr_tn_all), axis=0) - 1)
     
-    ax[0].plot(idx_uq, mean1, '-o', color='k')
-    ax[0].errorbar(idx_uq, mean1, sem1, color='k')
-    
-    ax[0].set_ylabel('Correlation')  
+    ax[0].errorbar(idx_uq, mean1, sem1, fmt='-o', color='k', capsize=4)
+
+    ax[0].set_ylabel('Correlation')
     ax[0].set_xlabel('ISI duration (sec)')
     ax[0].set_title('Average over freqs.')
-    
-    return fig
 
-def f_plot_fig_SI_mat(SI_list, isi_uq, title_tag = ''):
+    # per-ISI groups for stat_compare; each entry is (data_array, x-position = ISI value).
+    # here we include every individual (dataset x frequency) correlation value at each ISI
+    # (not the per-dataset mean), so all the individual points enter the test. Pass ax[0], e.g.
+    #   sd.stat_compare(ax[0], groups, 'ISI 0.5', 'ISI 1', test='mannwhitney', alternative='two-sided')
+    groups = {}
+    for isi in idx_uq:
+        sel = (np.array(isi_list) == isi).flatten()
+        d = corr_vals[sel, :].flatten()              # all datasets x frequencies at this ISI
+        groups['ISI %g' % isi] = (d[np.isfinite(d)], float(isi))
+
+    return fig, ax, groups
+
+def plot_fig_isi_corr_trials2(corr_vals, isi_list, colormap='jet', metric_tag=None):
+    # nicer version: panel A = individual (dataset x freq) points + mean line + shaded SEM;
+    # panel B = per-frequency lines. Returns (fig, ax, groups) like plot_fig_isi_corr_trials.
+    fig, ax = plt.subplots(1, 2, figsize=(12, 5))
+    fig.text(0.07, .88, 'A', fontsize=16)
+    fig.text(0.51, .88, 'B', fontsize=16)
+
+    idx_uq = np.unique(isi_list)
+    num_trials = corr_vals.shape[1]
+    isi_arr = np.array(isi_list).flatten()
+    rng = np.random.default_rng(0)   # reproducible jitter
+
+    # ---- panel B: per-frequency correlation vs ISI ----
+    col1 = plt.colormaps[colormap](np.linspace(0, 1, num_trials))
+    corr_tn_all = np.full((num_trials, len(idx_uq)), np.nan)
+    for n_tn in range(num_trials):
+        for n_isi in range(len(idx_uq)):
+            vals = corr_vals[idx_uq[n_isi] == isi_arr, n_tn]
+            if np.sum(~np.isnan(vals)):
+                corr_tn_all[n_tn, n_isi] = np.nanmean(vals)
+        ax[1].plot(idx_uq, corr_tn_all[n_tn, :], '-o', color=col1[n_tn], markersize=4, linewidth=1.2)
+    ax[1].set_xlabel('ISI duration (sec)')
+    ax[1].set_ylabel(metric_tag if metric_tag is not None else 'Correlation')
+    ax[1].set_title('Individual freqs.')
+    ax[1].legend([str(n + 1) for n in range(num_trials)], loc='upper right', fontsize=8, ncol=2, frameon=False)
+
+    # ---- panel A: individual points + mean line + shaded SEM ----
+    means = np.full(len(idx_uq), np.nan)
+    sems = np.full(len(idx_uq), np.nan)
+    for n_isi in range(len(idx_uq)):
+        pts = corr_vals[idx_uq[n_isi] == isi_arr, :].flatten()
+        pts = pts[np.isfinite(pts)]
+        if len(pts) == 0:
+            continue
+        jit = (rng.random(len(pts)) - 0.5) * 0.08
+        ax[0].plot(np.full(len(pts), idx_uq[n_isi]) + jit, pts, '.', color='0.7',
+                   markersize=4, alpha=0.5, zorder=1)
+        means[n_isi] = np.mean(pts)
+        sems[n_isi] = np.std(pts) / np.sqrt(len(pts) - 1) if len(pts) > 1 else np.nan
+
+    ax[0].fill_between(idx_uq, means - sems, means + sems, color='steelblue', alpha=0.3, zorder=2)
+    ax[0].plot(idx_uq, means, '-o', color='steelblue', markersize=6, linewidth=2, zorder=3)
+    ax[0].set_xlabel('ISI duration (sec)')
+    ax[0].set_ylabel(metric_tag if metric_tag is not None else 'Correlation')
+    ax[0].set_title('Average over freqs.')
+
+    for a in ax:
+        a.spines['top'].set_visible(False)
+        a.spines['right'].set_visible(False)
+
+    # ---- groups (all individual dataset x freq points per ISI) for stat_compare ----
+    groups = {}
+    for isi in idx_uq:
+        d = corr_vals[isi_arr == isi, :].flatten()
+        groups['ISI %g' % isi] = (d[np.isfinite(d)], float(isi))
+
+    return fig, ax, groups
+
+def plot_fig_SI_mat(SI_list, isi_uq, title_tag = ''):
+    # plot the per-ISI trial-by-trial similarity matrices side by side with a shared colorbar
     fig, ax = plt.subplots(1,len(isi_uq)+1, gridspec_kw={'width_ratios': list(np.ones(len(isi_uq))*10) + [1]}, figsize=(12, 2.8))
     for n_isi in range(len(SI_list)):
         ax1 = ax.flatten()[n_isi]
@@ -1035,8 +1125,9 @@ def f_plot_fig_SI_mat(SI_list, isi_uq, title_tag = ''):
     return fig
 
 
-def f_plot_fig_tau_networks_comb(tau_ob_net_all, tau_rnn_net_all, training_type, tau_ob_cell_all, tau_rnn_cell_all, do_log=True):
-    
+def plot_fig_tau_networks_comb3(tau_ob_net_all, tau_rnn_net_all, training_type, tau_ob_cell_all, tau_rnn_cell_all, do_log=True):
+    # legacy two-panel network/neuron tau figure (superseded by plot_fig_tau_networks_comb)
+
     fig, ax, = plt.subplots(1, 2, sharey=True, figsize=(12,5))
 
     fig.text(0.075, .88, 'A', fontsize=16)
@@ -1045,7 +1136,7 @@ def f_plot_fig_tau_networks_comb(tau_ob_net_all, tau_rnn_net_all, training_type,
     data_all = [np.array(tau_ob_net_all).flatten()] + tau_rnn_net_all
     labels_all = np.array(['Caim data'] + list(training_type))
     
-    f_plot_int_violin2(data_all,
+    plot_int_violin2(data_all,
                        net_labels = labels_all, 
                        axis=ax[0],
                        points=1000,
@@ -1062,7 +1153,7 @@ def f_plot_fig_tau_networks_comb(tau_ob_net_all, tau_rnn_net_all, training_type,
         
     data_cell_all = [np.hstack(tau_ob_cell_all).flatten()] + tau_rnn_cell_all2
     
-    f_plot_int_violin2(data_cell_all,
+    plot_int_violin2(data_cell_all,
                        net_labels = labels_all, 
                        axis=ax[1],
                        points=1000,
@@ -1076,18 +1167,323 @@ def f_plot_fig_tau_networks_comb(tau_ob_net_all, tau_rnn_net_all, training_type,
     ax[1].yaxis.set_tick_params(labelleft=True)
     ax[0].set_title('Network tau')
     ax[1].set_title('Neuron tau')
-    
+
     return fig
 
-def f_plot_fig_tau_networks(tau_ob_net_all, tau_rnn_net_all, training_type):
-    
+def get_tau_groups(tau_ob_net_all, tau_rnn_net_all, training_type, tau_ob_cell_all, tau_rnn_cell_all, gap=1.0):
+    # build the 8 tau groups (network block + neuron block) shared by the plot and the stats.
+    # returns:
+    #   groups: dict {label: (data_array, x_position)} e.g. 'CaIm net', 'CaIm neuron', ...
+    #   meta:   dict with 'labels', 'x_labels', 'positions', 'colors', 'n_net', 'data'
+    tt = np.array(training_type)
+    uq_types = list(dict.fromkeys(tt.tolist()))    # RNN types in order of appearance
+    short = {'ob trained': 'Ob', 'freq trained': 'Freq', 'untrained': 'Untr'}
+    sh = lambda l: short.get(l, l)
+
+    # network tau, one group per dataset type
+    net_groups = [np.array(tau_ob_net_all).flatten()]
+    net_names = ['CaIm']
+    for u in uq_types:
+        net_groups.append(np.hstack([np.asarray(tau_rnn_net_all[i]).flatten()
+                                     for i in range(len(tau_rnn_net_all)) if tt[i] == u]))
+        net_names.append(sh(u))
+
+    # neuron tau (mean over runs per network, then pooled per type)
+    tau_rnn_cell_mean = [np.nanmean(tau_rnn_cell_all[n], axis=0) for n in range(len(tau_rnn_cell_all))]
+    neuron_groups = [np.hstack(tau_ob_cell_all).flatten()]
+    for u in uq_types:
+        neuron_groups.append(np.hstack([np.asarray(tau_rnn_cell_mean[i]).flatten()
+                                       for i in range(len(tau_rnn_cell_mean)) if tt[i] == u]))
+
+    data_all = [g[np.isfinite(g)] for g in (net_groups + neuron_groups)]
+    labels = [n + ' net' for n in net_names] + [n + ' neuron' for n in net_names]
+    x_labels = net_names + net_names
+    base_colors = ['blue', 'green', 'orange', 'gray']
+    colors = base_colors[:len(net_names)] + base_colors[:len(net_names)]
+
+    n_net = len(net_names)
+    positions = list(range(n_net)) + [p + n_net + gap for p in range(n_net)]   # e.g. [0,1,2,3, 5,6,7,8]
+
+    groups = {labels[i]: (data_all[i], positions[i]) for i in range(len(labels))}
+    meta = {'labels': labels, 'x_labels': x_labels, 'positions': positions,
+            'colors': colors, 'n_net': n_net, 'data': data_all}
+    return groups, meta
+
+
+def plot_fig_tau_networks_comb2(tau_ob_net_all, tau_rnn_net_all, training_type, tau_ob_cell_all, tau_rnn_cell_all, do_log=True):
+    # all 8 groups (network block + neuron block) on one shared-y axis.
+    # returns (fig, ax, groups); pass ax + groups to stat_compare() to add significance brackets.
+    groups, meta = get_tau_groups(tau_ob_net_all, tau_rnn_net_all, training_type, tau_ob_cell_all, tau_rnn_cell_all)
+    data_all = meta['data']
+    positions = meta['positions']
+    colors_all = meta['colors']
+    x_labels = meta['x_labels']
+    n_net = meta['n_net']
+    num = len(data_all)
+
+    fig, ax1 = plt.subplots(1, 1, figsize=(12, 5))
+
+    parts = ax1.violinplot(data_all, positions=positions, showmeans=False, showextrema=False,
+                          quantiles=[[0.05, 0.95]] * num, points=1000)
+    if 'cquantiles' in parts:
+        parts['cquantiles'].set_color('k')
+    for i in range(num):
+        parts['bodies'][i].set_facecolor(colors_all[i])
+        parts['bodies'][i].set_edgecolor(colors_all[i])
+    for i in range(num):
+        y = data_all[i]
+        ax1.plot(positions[i], np.mean(y), '_', color='black', mew=2, markersize=30)
+        ax1.errorbar(positions[i], np.mean(y), np.std(y), fmt='o', color='black', markersize=4, linewidth=2, capsize=8)
+
+    ax1.set_xticks(positions)
+    ax1.set_xticklabels(x_labels, rotation=0)
+    if do_log:
+        ax1.set_yscale('log')
+    ax1.set_ylabel('Tau (sec)')
+    ax1.set_title('Network and neuron intrinsic timescales')
+
+    # group underlines + labels beneath (x in data coords, y in axes fraction)
+    trans = ax1.get_xaxis_transform()
+    net_pos = positions[:n_net]
+    neuron_pos = positions[n_net:]
+    for xs, name, col in [(net_pos, 'Networks', 'black'), (neuron_pos, 'Neurons', 'red')]:
+        ax1.plot([xs[0] - 0.45, xs[-1] + 0.45], [-0.13, -0.13], transform=trans,
+                 color=col, lw=4, clip_on=False)
+        ax1.text(np.mean(xs), -0.19, name, transform=trans, ha='center', va='top',
+                 fontsize=13, fontweight='bold', color=col)
+
+    fig.subplots_adjust(bottom=0.26)
+
+    return fig, ax1, groups
+
+
+def plot_fig_tau_networks_comb(tau_ob_net_all, tau_rnn_net_all, training_type, tau_ob_cell_all, tau_rnn_cell_all, do_log=True):
+    # cleaner version of comb2: violin body + a slim inner boxplot (median + IQR + whiskers),
+    # instead of the mean/SD dash + 5/95 quantile lines. Returns (fig, ax, groups) for stat_compare().
+    groups, meta = get_tau_groups(tau_ob_net_all, tau_rnn_net_all, training_type, tau_ob_cell_all, tau_rnn_cell_all)
+    data_all = meta['data']
+    positions = meta['positions']
+    colors_all = meta['colors']
+    x_labels = meta['x_labels']
+    n_net = meta['n_net']
+    num = len(data_all)
+
+    fig, ax1 = plt.subplots(1, 1, figsize=(12, 5))
+
+    # violin bodies only (no extrema / quantile lines)
+    parts = ax1.violinplot(data_all, positions=positions, showmeans=False, showextrema=False,
+                           showmedians=False, points=1000)
+    for i in range(num):
+        parts['bodies'][i].set_facecolor(colors_all[i])
+        parts['bodies'][i].set_edgecolor(colors_all[i])
+        parts['bodies'][i].set_alpha(0.55)
+
+    # slim inner boxplot: median + IQR + whiskers, no outliers
+    ax1.boxplot(data_all, positions=positions, widths=0.12, showfliers=False, patch_artist=True,
+                medianprops=dict(color='black', linewidth=1.5),
+                boxprops=dict(facecolor='white', edgecolor='black', linewidth=1.0),
+                whiskerprops=dict(color='black', linewidth=1.0),
+                capprops=dict(color='black', linewidth=1.0))
+
+    ax1.set_xticks(positions)
+    ax1.set_xticklabels(x_labels, rotation=0)
+    if do_log:
+        ax1.set_yscale('log')
+        # plain-number tick labels (0.1, 1, 10, ...) instead of 10^0 exponential form
+        ax1.yaxis.set_major_formatter(FuncFormatter(lambda v, _: ('%g' % v)))
+        ax1.yaxis.set_minor_formatter(NullFormatter())
+    ax1.set_ylabel('Tau (sec)')
+    ax1.set_title('Network and neuron intrinsic timescales')
+
+    # group underlines + labels beneath (x in data coords, y in axes fraction)
+    trans = ax1.get_xaxis_transform()
+    net_pos = positions[:n_net]
+    neuron_pos = positions[n_net:]
+    for xs, name, col in [(net_pos, 'Networks', 'black'), (neuron_pos, 'Neurons', 'red')]:
+        ax1.plot([xs[0] - 0.45, xs[-1] + 0.45], [-0.13, -0.13], transform=trans,
+                 color=col, lw=4, clip_on=False)
+        ax1.text(np.mean(xs), -0.19, name, transform=trans, ha='center', va='top',
+                 fontsize=13, fontweight='bold', color=col)
+
+    fig.subplots_adjust(bottom=0.26)
+
+    return fig, ax1, groups
+
+
+def p_to_star(p):
+    # p-value to significance stars: *** <0.001, ** <0.01, * <0.05, else n.s.
+    if p < 0.001: return '***'
+    if p < 0.01:  return '**'
+    if p < 0.05:  return '*'
+    return 'n.s.'
+
+
+def draw_sig_bracket(ax, x1, x2, p, star=True, color='black', y=None):
+    # draw a significance bracket + label between x1 and x2 in the space above the data,
+    # extending the y-axis to fit. Stacked calls space evenly (pixel gaps) on log or linear.
+    sig = p_to_star(p)
+    def _yoff(y_data, pts):
+        x0 = ax.get_xlim()[0]
+        yd = ax.transData.transform((x0, y_data))[1] + pts * ax.figure.dpi / 72.0
+        return ax.transData.inverted().transform((x0, yd))[1]
+
+    step_pts = 15      # spacing between stacked brackets
+    margin_pts = 24    # space above the topmost bracket/star and the plot edge
+    last = getattr(ax, '_sig_last_y', None)
+    if y is not None:
+        y_line = y
+    elif last is None:
+        y_line = _yoff(ax.get_ylim()[1], step_pts)
+    else:
+        y_line = _yoff(last, step_pts)
+    ax._sig_last_y = y_line
+    y_tick = _yoff(y_line, -5)
+    ax.set_ylim(top=_yoff(y_line, margin_pts))
+    ax.plot([x1, x1, x2, x2], [y_tick, y_line, y_line, y_tick], color=color, lw=1.5, clip_on=False)
+    # '*' renders high in its box (va='top'); text like 'n.s.'/'p=..' sits low (va='bottom')
+    label = sig if star else ('p=%.3g' % p)
+    if set(label) <= set('*'):
+        va, dy = 'top', 7
+    else:
+        va, dy = 'bottom', 3
+    ax.annotate(label, xy=((x1 + x2) / 2.0, y_line), xytext=(0, dy), textcoords='offset points',
+                ha='center', va=va, color=color, fontsize=12, annotation_clip=False)
+
+
+def stat_compare(ax, groups, name1, name2, test='mannwhitney', alternative='two-sided',
+                 stat_file=None, y=None, star=True, color='black'):
+    # compare two groups from get_tau_groups(); print result, append to a stats file,
+    # and draw a significance bracket on the same panel (ax) between the two groups.
+    #   test: 'mannwhitney' (unpaired) or 'wilcoxon' (paired; needs equal-length data)
+    #   alternative: 'two-sided', 'greater', or 'less' (name1 vs name2)
+    d1, x1 = groups[name1]
+    d2, x2 = groups[name2]
+    d1 = np.asarray(d1, dtype=float); d1 = d1[np.isfinite(d1)]
+    d2 = np.asarray(d2, dtype=float); d2 = d2[np.isfinite(d2)]
+
+    if test in ('wilcoxon', 'paired'):
+        if len(d1) != len(d2):
+            raise ValueError('wilcoxon needs paired equal-length data (got %d and %d); '
+                             'use test="mannwhitney" or pass paired per-dataset values' % (len(d1), len(d2)))
+        stat, p = wilcoxon(d1, d2, alternative=alternative)
+        n_str = 'n=%d pairs' % len(d1)
+    elif test in ('mannwhitney', 'mannwhitneyu', 'mwu'):
+        stat, p = mannwhitneyu(d1, d2, alternative=alternative)
+        n_str = 'n1=%d; n2=%d' % (len(d1), len(d2))
+    elif test in ('ttest', 'ttest_ind', 't'):
+        stat, p = ttest_ind(d1, d2, equal_var=False, alternative=alternative)   # Welch's t-test
+        n_str = 'n1=%d; n2=%d' % (len(d1), len(d2))
+    elif test in ('ttest_rel', 'ttest_paired', 'paired_t'):
+        if len(d1) != len(d2):
+            raise ValueError('paired t-test needs equal-length data (got %d and %d)' % (len(d1), len(d2)))
+        stat, p = ttest_rel(d1, d2, alternative=alternative)
+        n_str = 'n=%d pairs' % len(d1)
+    else:
+        raise ValueError('unknown test: %s (use "mannwhitney", "wilcoxon", "ttest", or "ttest_rel")' % test)
+
+    sig = p_to_star(p)
+    print('%s vs %s | %s (%s) | %s | stat=%.4g | p=%.4g | %s'
+          % (name1, name2, test, alternative, n_str, stat, p, sig))
+
+    if stat_file is not None:
+        new = not os.path.isfile(stat_file)
+        with open(stat_file, 'a') as f:
+            if new:
+                f.write('group1,group2,test,alternative,n,statistic,p_value,significance\n')
+            f.write('%s,%s,%s,%s,%s,%.6g,%.6g,%s\n'
+                    % (name1, name2, test, alternative, n_str, stat, p, sig))
+
+    # draw the significance bracket on the panel
+    draw_sig_bracket(ax, x1, x2, p, star=star, color=color, y=y)
+
+    return {'name1': name1, 'name2': name2, 'test': test, 'alternative': alternative,
+            'statistic': stat, 'p': p, 'significance': sig}
+
+
+def _bh_fdr(p):
+    # Benjamini-Hochberg FDR-adjusted p-values (matches MATLAB f_FDR_correction.m)
+    p = np.asarray(p, dtype=float)
+    n = p.size
+    order = np.argsort(p)                                  # ascending
+    ranked = p[order] * n / (np.arange(n) + 1)             # p * n / rank
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]     # monotone from the top
+    ranked = np.minimum(ranked, 1.0)
+    out = np.empty(n)
+    out[order] = ranked
+    return out
+
+
+def isi_stats(groups, ax=None, draw='consecutive', color='black', posthoc='tukey'):
+    # Stats for the ISI correlation figure: one-way ANOVA across ALL ISI groups + post-hoc.
+    # groups: dict {label: (data, x_position)} from plot_fig_isi_corr_trials.
+    # posthoc: 'tukey' (Tukey HSD) OR 'fisher_fdr' = MATLAB f_dv_plot_anova1: Fisher LSD using the
+    #          pooled ANOVA error MSE, t with df=n1+n2-1, two-tailed, then Benjamini-Hochberg FDR.
+    # draw: None, 'consecutive' (0.5-1,1-2,2-4), 'first' (vs first group), or 'all'.
+    labels = list(groups)
+    data = [np.asarray(groups[k][0], dtype=float) for k in labels]
+    data = [d[np.isfinite(d)] for d in data]
+    ncat = len(data)
+
+    F, p_anova = f_oneway(*data)
+    print('One-way ANOVA across %d groups: F=%.4g, p=%.4g' % (ncat, F, p_anova))
+
+    if posthoc in ('fisher_fdr', 'fisher', 'matlab'):
+        from scipy.stats import t as _tdist
+        ns = np.array([len(d) for d in data])
+        means = np.array([d.mean() for d in data])
+        N = int(ns.sum())
+        MSE = float(sum(((d - d.mean()) ** 2).sum() for d in data)) / (N - ncat)   # pooled ANOVA error
+        pairs = [(i, j) for i in range(ncat) for j in range(i + 1, ncat)]
+        praw = np.array([2 * _tdist.sf(abs((means[i] - means[j]) / np.sqrt(MSE / ns[i] + MSE / ns[j])),
+                                       ns[i] + ns[j] - 1) for (i, j) in pairs])
+        padj = _bh_fdr(praw)
+        pmat = np.ones((ncat, ncat))
+        for k, (i, j) in enumerate(pairs):
+            pmat[i, j] = pmat[j, i] = padj[k]
+        method = 'Fisher LSD (pooled MSE) + Benjamini-Hochberg FDR'
+    else:
+        try:
+            from scipy.stats import tukey_hsd
+            pmat = np.asarray(tukey_hsd(*data).pvalue)
+            method = 'Tukey HSD'
+        except Exception:
+            m = ncat * (ncat - 1) // 2
+            pmat = np.ones((ncat, ncat))
+            for i in range(ncat):
+                for j in range(i + 1, ncat):
+                    _, pp = ttest_ind(data[i], data[j], equal_var=False)
+                    pmat[i, j] = pmat[j, i] = min(pp * m, 1.0)
+            method = 'pairwise Welch t-test + Bonferroni'
+
+    print('Post-hoc (%s):' % method)
+    for i in range(len(labels)):
+        for j in range(i + 1, len(labels)):
+            print('  %s vs %s: p=%.4g %s' % (labels[i], labels[j], pmat[i, j], p_to_star(pmat[i, j])))
+
+    if ax is not None and draw:
+        if draw == 'consecutive':
+            pairs = [(i, i + 1) for i in range(len(labels) - 1)]
+        elif draw == 'first':
+            pairs = [(0, j) for j in range(1, len(labels))]
+        elif draw == 'all':
+            pairs = [(i, j) for i in range(len(labels)) for j in range(i + 1, len(labels))]
+        else:
+            pairs = []
+        for (i, j) in pairs:
+            draw_sig_bracket(ax, groups[labels[i]][1], groups[labels[j]][1], pmat[i, j], color=color)
+
+    return {'labels': labels, 'F': F, 'p_anova': p_anova, 'pvalue': pmat, 'method': method}
+
+def plot_fig_tau_networks(tau_ob_net_all, tau_rnn_net_all, training_type):
+    # two-panel network-tau figure (CaIm | RNN by training type) drawn as violins
+
     fig, ax, = plt.subplots(1, 2, sharey=True, gridspec_kw={'width_ratios': [1, 3]}, figsize=(6,5))
 
     fig.text(0.02, .89, 'A', fontsize=16)
     fig.text(0.32, .89, 'B', fontsize=16)
     fig.suptitle('Network Tau')
     
-    f_plot_int_violin2(tau_ob_net_all,
+    plot_int_violin2(tau_ob_net_all,
                        net_labels = None, 
                        title_tag = 'CaIm',
                        axis=ax[0],
@@ -1100,7 +1496,7 @@ def f_plot_fig_tau_networks(tau_ob_net_all, tau_rnn_net_all, training_type):
                        do_log=True)
     
     
-    f_plot_int_violin2(tau_rnn_net_all,
+    plot_int_violin2(tau_rnn_net_all,
                        net_labels = training_type, 
                        title_tag = 'RNN',
                        axis=ax[1],
@@ -1116,8 +1512,9 @@ def f_plot_fig_tau_networks(tau_ob_net_all, tau_rnn_net_all, training_type):
     
     return fig
 
-def f_plot_fig_tau_networks2(tau_ob_net_all, tau_rnn_net_all, training_type):
-    
+def plot_fig_tau_networks2(tau_ob_net_all, tau_rnn_net_all, training_type):
+    # single-panel network-tau violins (CaIm data + each RNN training type on one axis)
+
     fig, ax, = plt.subplots(1, 1, figsize=(6,5))
 
     fig.text(0.02, .89, 'A', fontsize=16)
@@ -1127,7 +1524,7 @@ def f_plot_fig_tau_networks2(tau_ob_net_all, tau_rnn_net_all, training_type):
     data_all = [np.array(tau_ob_net_all).flatten()] + tau_rnn_net_all
     labels_all = np.array(['Caim data'] + list(training_type))
     
-    f_plot_int_violin2(data_all,
+    plot_int_violin2(data_all,
                        net_labels = labels_all, 
                        axis=ax,
                        points=1000,
@@ -1142,8 +1539,9 @@ def f_plot_fig_tau_networks2(tau_ob_net_all, tau_rnn_net_all, training_type):
 
 #%%
 
-def f_plot_cat_data2(y_data_in, rnn_leg, title_tag = '', do_log=False):
-    
+def plot_cat_data2(y_data_in, rnn_leg, title_tag = '', do_log=False):
+    # scatter of each category's values with a mean +/- std marker
+
     num_cat = len(y_data_in)
     
     plt.figure()
@@ -1162,8 +1560,9 @@ def f_plot_cat_data2(y_data_in, rnn_leg, title_tag = '', do_log=False):
     if do_log:
         ax1.set_yscale('log')
 
-def f_plot_cat_data_violin(y_data_in, rnn_leg, title_tag = '', points=100, mean_std=True, showmeans=False, showmedians=False, quantile = [], colors=[], do_log=False):
-    
+def plot_cat_data_violin(y_data_in, rnn_leg, title_tag = '', points=100, mean_std=True, showmeans=False, showmedians=False, quantile = [], colors=[], do_log=False):
+    # violin plot of categorical groups, optional mean +/- std overlay and log y-axis
+
     num_cat = len(y_data_in)
     
     plt.figure()
@@ -1188,8 +1587,9 @@ def f_plot_cat_data_violin(y_data_in, rnn_leg, title_tag = '', points=100, mean_
     if do_log:
         ax1.set_yscale('log')
         
-def f_plot_cat_data_bar(y_data_in, rnn_leg, title_tag = '', do_sem=True, colors=[]):
-    
+def plot_cat_data_bar(y_data_in, rnn_leg, title_tag = '', do_sem=True, colors=[]):
+    # bar plot (mean +/- sem or std) of categorical groups
+
     num_cat = len(y_data_in)
     
     plt.figure()
@@ -1208,7 +1608,8 @@ def f_plot_cat_data_bar(y_data_in, rnn_leg, title_tag = '', do_sem=True, colors=
         plt.errorbar(n_net, np.mean(y_data), stds, fmt='o', color='black', mew=2, markersize=5, linewidth=2, capsize=10)
     plt.title(title_tag)
 
-def f_plot_int_violin2(tau_net_list, net_labels = None, data_lab = ['CaIm data'], title_tag = '', axis=None, points=100, mean_std=True, showmeans=False, showmedians=False, quantile = [0.05, 0.95], colors=['blue', 'green', 'orange', 'gray'], do_log=False):
+def plot_int_violin2(tau_net_list, net_labels = None, data_lab = ['CaIm data'], title_tag = '', axis=None, points=100, mean_std=True, showmeans=False, showmedians=False, quantile = [0.05, 0.95], colors=['blue', 'green', 'orange', 'gray'], do_log=False):
+    # violin plot of tau distributions grouped by net_labels, with optional mean +/- std overlay and log y-axis
     
     num_net = len(tau_net_list)
     
@@ -1266,7 +1667,7 @@ def f_plot_int_violin2(tau_net_list, net_labels = None, data_lab = ['CaIm data']
     
     if do_log:
         ax1.set_yscale('log')
-        ax1.set_ylabel('Log tau (sec)')
+        ax1.set_ylabel('Tau (sec)')
     else:
         ax1.set_ylabel('Tau (sec)')
     

@@ -12,6 +12,7 @@ import time
 from sklearn import svm
 from sklearn.metrics import accuracy_score
 from scipy import linalg
+from scipy.stats import t as t_dist
 
 import matplotlib.pyplot as plt
 #from matplotlib import gridspec
@@ -19,10 +20,12 @@ from matplotlib.patches import Rectangle
 
 #%% decoder make cross validation groups
 
-def f_make_cv_groups(num_trials, num_cv_groups):
-    
+def make_cv_groups(num_trials, num_cv_groups, seed=None):
+    # assign trials to num_cv_groups cross-validation test folds (shuffled); returns a (num_cv x num_trials) bool mask
+
+    rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
     cv_tr_idx = np.arange(num_trials)
-    np.random.shuffle(cv_tr_idx)  
+    rng.shuffle(cv_tr_idx)
     
     test_groups = np.zeros((num_cv_groups, num_trials), dtype=bool)
     
@@ -36,12 +39,13 @@ def f_make_cv_groups(num_trials, num_cv_groups):
     return test_groups
 
 #%%
-def f_sample_trial_data_dec(rates_in, stim_loc, trial_types):
-    
+def sample_trial_data_dec(rates_in, stim_loc, trial_types, seed=None):
+    # draw one trial per trial type from each run to build balanced decoder input; returns (rates_out, y_labels)
+    rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
     num_dec = len(rates_in)
     num_tt = len(trial_types)
     
-    # fiirst sample stim
+    # first sample stim
     rates_out = []
     
     for n_dec in range(num_dec):
@@ -59,7 +63,7 @@ def f_sample_trial_data_dec(rates_in, stim_loc, trial_types):
             for n_tt in range(num_tt):
                 tt_loc = np.where(run_data1 == trial_types[n_tt])[0]
                 if tt_loc.shape[0]:
-                    tt_loc_all[n_tt] = np.random.choice(tt_loc, 1)[0]
+                    tt_loc_all[n_tt] = rng.choice(tt_loc, 1)[0]
                 else:
                     has_data[n_run] = 0
     
@@ -72,7 +76,7 @@ def f_sample_trial_data_dec(rates_in, stim_loc, trial_types):
         dd_red_samp_rates3 = np.reshape(dd_red_samp_rates2, (trial_len, num_tt*num_batch, num_neurons), order='F')
         rates_out.append(dd_red_samp_rates3)
     
-    # ctreate y
+    # create y
     num_train = np.sum(has_data)
     
     y_data_templ = np.reshape(np.arange(num_tt)+1, (num_tt,1), order='F')
@@ -83,11 +87,18 @@ def f_sample_trial_data_dec(rates_in, stim_loc, trial_types):
 
 #%%
 
-def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, num_cv=5, fixed_time=0, add_noise_sigma=0.1, normalize = True, normalize_joint = False, get_train_coeffs=False, log=False, shuffle_trial_order=False, verbose=False):
+def run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, num_cv=5, fixed_time=0, add_noise_sigma=0.1, normalize = True, normalize_joint = False, get_train_coeffs=False, log=False, shuffle_trial_order=False, verbose=False, seed=None):
+    # cross-validated SVM decoder trained per time bin. train_test_method: 'diag' (test at the train bin),
+    # 'full' (every train-bin x test-bin pair), 'train_at_stim'/'test_at_stim'. X_all/Y_all are lists holding the
+    # real and label-shuffled versions; pca_var_frac<1 reduces inputs by PCA. Returns a dict with 'performance'.
+    rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
     num_dset = len(X_all)
     
     num_cells, num_t_bins, num_trials = X_all[0].shape
-    
+
+    if num_trials < num_cv:
+        raise ValueError('num_trials=%d is less than num_cv=%d; reduce num_cv (cross-validation folds).' % (num_trials, num_cv))
+
     if train_test_method == 'full':
         train_t_idx = np.arange(num_t_bins)
         test_t_idx = np.repeat(np.arange(num_t_bins).reshape((1,num_t_bins)), num_t_bins, axis=0)
@@ -115,7 +126,7 @@ def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, nu
         X_use = X_all[n_dset]
         
         if add_noise_sigma:
-            X_use = X_use + np.random.normal(0, add_noise_sigma, size=X_use.shape)
+            X_use = X_use + rng.normal(0, add_noise_sigma, size=X_use.shape)
         
         if normalize:
             for n_cell in range(num_cells):
@@ -143,8 +154,10 @@ def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, nu
             X_use2 = X_use
             
         y_data2 = Y_all[n_dset]
-        
-        for n_bin in range(train_t_idx.shape[0]): # 
+
+        cv_groups = make_cv_groups(num_trials, num_cv, seed=rng)
+
+        for n_bin in range(train_t_idx.shape[0]): #
 
             if log:
                 print('dset %d of %d; train bin %d/%d' % (n_dset+1, num_dset, n_bin, train_t_idx.shape[0]))    
@@ -152,9 +165,7 @@ def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, nu
             n_bin2 = train_t_idx[n_bin]
             
             X_train = X_use2[:,n_bin2,:]
-            
-            cv_groups = f_make_cv_groups(num_trials, num_cv)
-            
+
             for n_cv in range(num_cv):
                 test_idx = cv_groups[n_cv]
                 train_idx = ~test_idx
@@ -164,14 +175,17 @@ def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, nu
                 
                 if shuffle_trial_order:
                     trials_idx = np.arange(y_data3.shape[0])
-                    np.random.shuffle(trials_idx)
+                    rng.shuffle(trials_idx)
                     
                     X_train3 = X_train2[:,trials_idx]
                     y_data4 = y_data3[trials_idx]
                 else:
                     X_train3 = X_train2
                     y_data4 = y_data3
-                
+
+                if len(np.unique(y_data4)) < 2:
+                    raise ValueError('Cross-validation fold has a single class (%s); reduce num_cv or check class balance.' % np.unique(y_data4))
+
                 #svc = svm.LinearSVC(C=1,verbose=verbose) # ,verbose=True , probability=True
                 svc = svm.SVC(kernel='linear', C=1,gamma='auto',verbose=verbose) # ,verbose=True , probability=True
                 svc.fit(X_train3.T, y_data4)
@@ -258,17 +272,20 @@ def f_run_binwise_dec(X_all, Y_all, train_test_method='diag', pca_var_frac=1, nu
     
     return dec_out
 
-def f_shuffle_trials(trials):
+def shuffle_trials(trials, seed=None):
+    # return a copy of the trial-label vector with trials randomly permuted (label-shuffle control)
+    rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
     trials_idx = np.arange(trials.shape[0])
-    np.random.shuffle(trials_idx)
+    rng.shuffle(trials_idx)
     trials_shuff = trials[trials_idx]
-    
+
     return trials_shuff
 
 #%%
 
-def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, fixed_time=0.25, axis=None, title_tag='', plot_single_trial=False):
-    
+def plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, fixed_time=0.25, axis=None, title_tag='', plot_single_trial=False):
+    # plot mean +/- SEM decoding performance over time for each decoder (data vs shuffle)
+
     if type(dec_data_list) is not list:
         dec_data_list = [dec_data_list]
     
@@ -393,6 +410,7 @@ def f_plot_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=
     return figures
 
 def if_get_leg(dec, f_leg):
+    # return per-decoder legend labels: dec['legend'] if present, else the provided default f_leg
     if 'legend' in dec:
         leg = dec['legend']
     elif f_leg is not None:
@@ -401,7 +419,8 @@ def if_get_leg(dec, f_leg):
     return leg
 
 
-def f_plot_diag_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, axis=None, title_tag='', colors = ['blue', 'black']):
+def plot_diag_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, axis=None, title_tag='', colors = ['blue', 'black'], add_sig=False, sig_levels=(0.001, 0.01, 0.05), sig_color=None, sig_label=True):
+    # plot diagonal (same-bin) decoding performance over time (mean +/- SEM per decoder); add_sig overlays binwise data-vs-shuffle significance
     
     
     if type(dec_data_list) is not list:
@@ -436,7 +455,33 @@ def f_plot_diag_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_s
         l1, = axis.plot(plot_t2, mean_trace, color=colors[n_dec])
         leg_lines.append(l1)
         axis.fill_between(plot_t2, mean_trace-sem_trace, mean_trace+sem_trace, color=colors[n_dec], alpha=0.2)
-    
+
+    if add_sig and num_dec >= 2:
+        # binwise data (n_dec=0) vs shuffle (n_dec=1) two-sample t-test, matches MATLAB f_dv_decoder_onevall
+        data_arr = traces_all[:, 0, :]
+        shuff_arr = traces_all[:, 1, :]
+        n1, n2 = data_arr.shape[0], shuff_arr.shape[0]
+        denom = np.sqrt(np.var(data_arr, axis=0, ddof=1)/n1 + np.var(shuff_arr, axis=0, ddof=1)/n2)
+        denom[denom == 0] = np.nan
+        t_vals = (np.mean(data_arr, axis=0) - np.mean(shuff_arr, axis=0))/denom
+        p_vals = 2*t_dist.sf(np.abs(t_vals), n1 + n2 - 2)
+
+        col_sig = colors[0] if sig_color is None else sig_color
+        y_range = np.nanmax([np.nanmax(np.mean(traces_all[:, d, :], axis=0)) for d in range(num_dec)]) - \
+                  np.nanmin([np.nanmin(np.mean(traces_all[:, d, :], axis=0)) for d in range(num_dec)])
+        step = 0.05*y_range if y_range > 0 else 0.03
+        prev_top = getattr(axis, '_dec_sig_top', None)
+        base = (prev_top + step) if prev_top is not None else (np.nanmax(np.mean(traces_all[:, 0, :], axis=0)) + 2*step)
+        n_lev = len(sig_levels)
+        for i, lev in enumerate(sig_levels):
+            y_level = base + (n_lev - 1 - i)*step   # most stringent tier on top
+            sig_trace = np.full(len(plot_t2), np.nan)
+            sig_trace[p_vals < lev] = y_level
+            axis.plot(plot_t2, sig_trace, '.-', color=col_sig, markersize=4, linewidth=1)
+            if sig_label and prev_top is None:
+                axis.text(plot_t2[0] + 0.02*(plot_t2[-1] - plot_t2[0]), y_level, 'p<%g' % lev, fontsize=7, color=col_sig, va='center', ha='left', clip_on=False)
+        axis._dec_sig_top = base + (n_lev - 1)*step
+
     if plot_legend is not None:
         axis.legend(handles=leg_lines, labels=plot_legend)
     axis.set_xlabel('Time (sec)')
@@ -446,8 +491,9 @@ def f_plot_diag_binwise_dec(dec_data_list, plot_t=None, plot_legend=None, plot_s
            
     return axis
 
-def f_plot_full_binwise_dec(dec_data, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, axis=None, title_tag='', clim=[0, 1], clim_width_ratio = 10, figsize=(17, 3.5)):
-    
+def plot_full_binwise_dec(dec_data, plot_t=None, plot_legend=None, plot_start=-1, plot_end=5, axis=None, title_tag='', clim=[0, 1], clim_width_ratio = 10, figsize=(17, 3.5)):
+    # plot the full train-time x test-time decoding matrix (temporal generalization) for each decoder
+
 
     plt_start2 = np.argmin(np.abs(plot_start - plot_t))
     plt_end2 = np.argmin(np.abs(plot_end - plot_t))
@@ -465,20 +511,17 @@ def f_plot_full_binwise_dec(dec_data, plot_t=None, plot_legend=None, plot_start=
         ax1 = axis
     
     for n_dec in range(num_dec):
-        perform_train_test[plt_start2:plt_end2,plt_start2:plt_end2,n_dec]
-    
-    for n_dec in range(num_dec):
-        
+
         im1 = ax1[n_dec].imshow(perform_train_test[plt_start2:plt_end2,plt_start2:plt_end2,n_dec], extent=(np.min(plot_t2), np.max(plot_t2), np.max(plot_t2), np.min(plot_t2)), clim=clim)
         #ax1.set_clim([0, 1])
-        ax1[n_dec].set_xlabel('Test time')
-        ax1[n_dec].set_ylabel('Train time')
+        ax1[n_dec].set_xlabel('Test time (sec)')
+        ax1[n_dec].set_ylabel('Train time (sec)')
         if len(title_tag):
-            ax1[n_dec].set_title('%s; %s' % (title_tag, if_get_leg(dec_data, plot_legend)[n_dec]))
+            ax1[n_dec].set_title('%s %s' % (title_tag, if_get_leg(dec_data, plot_legend)[n_dec]))
         else:
-            axis[n_dec].set_title(plot_legend)
+            ax1[n_dec].set_title(plot_legend[n_dec])
     if len(ax1) > num_dec:
-        plt.colorbar(im1, cax=axis.flatten()[-1])
+        plt.colorbar(im1, cax=ax1.flatten()[-1])
         ax1.flatten()[-1].set_ylabel('Performance')
         
         #cbar = fig.colorbar(im1)
@@ -487,8 +530,9 @@ def f_plot_full_binwise_dec(dec_data, plot_t=None, plot_legend=None, plot_start=
         return fig
 
 #%%
-def f_run_one_shot_dec(x_data, y_data, trial_stim_on=[], shuff_stim_type=[], shuff_bins=[], stim_on_train=True, num_cv=5, equalize_y_input=True):
-    
+def run_one_shot_dec(x_data, y_data, trial_stim_on=[], shuff_stim_type=[], shuff_bins=[], stim_on_train=True, num_cv=5, equalize_y_input=True):
+    # train once at the stimulus bin and test at all bins (or the reverse) - stimulus-onset generalization decoder
+
     num_dec = len(x_data)
     trial_len, num_trials, _ = x_data[0].shape
     
@@ -534,7 +578,7 @@ def f_run_one_shot_dec(x_data, y_data, trial_stim_on=[], shuff_stim_type=[], shu
     
     for n_dec in range(num_dec):
         print('decoder %d/%d' % (n_dec+1, num_dec))
-        cv_groups = f_make_cv_groups(num_trials, num_cv)
+        cv_groups = make_cv_groups(num_trials, num_cv)
         
         x_data1 = x_data[n_dec]
         
@@ -635,7 +679,7 @@ def f_run_one_shot_dec(x_data, y_data, trial_stim_on=[], shuff_stim_type=[], shu
     return perform_final, perform_binwise, perform_y_is_cat
 
 #%%
-def f_plot_one_shot_dec_bycat(perform_final, perform_binwise, perform_y_is_cat, plot_t1, leg_all, trial_labels, trial_colors):
+def plot_one_shot_dec_bycat(perform_final, perform_binwise, perform_y_is_cat, plot_t1, leg_all, trial_labels, trial_colors):
     #y_is_ddfin = np.mean(y_is_dd, axis=2)
     #test_is_ddfin = test_is_cat_final[:,:,:,1]
     trial_len, num_tt, num_cat, num_dec = perform_y_is_cat.shape
@@ -697,7 +741,7 @@ def f_plot_one_shot_dec_bycat(perform_final, perform_binwise, perform_y_is_cat, 
     plt.legend(ax3.lines, leg_all2+ ['max', 'chance']) # ['actual'] + 
     plt.suptitle('stim type decoding, one shot train, %s' % (title_tag7))
 
-def f_plot_one_shot_dec_avecat(perform_final, perform_binwise, perform_y_is_cat, plot_t1, net_idx, leg_net):
+def plot_one_shot_dec_avecat(perform_final, perform_binwise, perform_y_is_cat, plot_t1, net_idx, leg_net):
     #y_is_ddfin = np.mean(y_is_dd, axis=2)
     #test_is_ddfin = test_is_cat_final[:,:,:,1]
     trial_len, num_tt, num_cat, num_dec = perform_y_is_cat.shape
@@ -780,7 +824,7 @@ def f_plot_one_shot_dec_avecat(perform_final, perform_binwise, perform_y_is_cat,
     plt.suptitle('stim type decoding, one shot train, %s' % (title_tag7))
     
 
-def f_plot_one_shot_dec_bycat2(perform_final, perform_binwise, perform_y_is_cat, plot_t1, net_idx, leg_net, trial_labels, trial_colors):
+def plot_one_shot_dec_bycat2(perform_final, perform_binwise, perform_y_is_cat, plot_t1, net_idx, leg_net, trial_labels, trial_colors):
     #y_is_ddfin = np.mean(y_is_dd, axis=2)
     #test_is_ddfin = test_is_cat_final[:,:,:,1]
     trial_len, num_tt, num_cat, num_dec = perform_y_is_cat.shape
@@ -850,7 +894,7 @@ def f_plot_one_shot_dec_bycat2(perform_final, perform_binwise, perform_y_is_cat,
 
 #%%
 
-def f_plot_one_shot_dec_iscat(perform_final, perform_binwise, perform_y_is_cat, plot_t1, leg_all, trial_labels, trial_colors, cat_plot=1):
+def plot_one_shot_dec_iscat(perform_final, perform_binwise, perform_y_is_cat, plot_t1, leg_all, trial_labels, trial_colors, cat_plot=1):
     #y_is_ddfin = np.mean(y_is_dd, axis=2)
     #test_is_ddfin = test_is_cat_final[:,:,:,1]
     trial_len, num_tt, num_cat, num_dec = perform_y_is_cat.shape
